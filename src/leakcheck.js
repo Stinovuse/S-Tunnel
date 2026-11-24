@@ -106,7 +106,7 @@ async function udpPublicIp() {
 
 /**
  * @param {{realIPv4?:string, realIPv6?:string}} real  адреса, измеренные ДО подключения
- * @param {{udpExpected?:boolean}} [opts]  true для SOCKS5 (UDP должен идти через прокси)
+ * @param {{udpExpected?:boolean, proxyIp?:string, allowLan?:boolean}} [opts]  udpExpected: true для SOCKS5
  * @returns {Promise<Array<{name:string, ok:boolean, detail:string}>>}
  */
 async function runAll(real = {}, opts = {}) {
@@ -171,6 +171,22 @@ async function runAll(real = {}, opts = {}) {
     }
   }
   if (!phys.length) results.push({ name: 'Обход туннеля', ok: true, detail: 'физические адаптеры не найдены' });
+
+  // 6. Соединения, открытые ДО подключения и всё ещё идущие мимо туннеля
+  if (opts.proxyIp) {
+    try {
+      const fw = require('./firewall');
+      const list = await fw.listDirectConnections({ phys: phys.map((a) => a.address), proxyIp: opts.proxyIp, allowLan: !!opts.allowLan });
+      const procs = [...new Set(list.map((c) => c.proc || '?'))];
+      results.push({
+        name: 'Старые соединения мимо туннеля',
+        ok: list.length === 0,
+        detail: list.length === 0 ? 'нет' : `УТЕЧКА: ${list.length} шт. (${procs.join(', ')}) — перезапустите эти программы`,
+      });
+    } catch (e) {
+      results.push({ name: 'Старые соединения мимо туннеля', ok: true, detail: `проверка недоступна (${e.message})` });
+    }
+  }
 
   return results;
 }

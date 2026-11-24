@@ -28,6 +28,13 @@ class Tunnel extends EventEmitter {
     this.lastError = '';
     this.leakResults = [];
     fs.mkdirSync(workDir, { recursive: true });
+    this.cfgPath = path.join(workDir, 'config.json');
+    this.wipeConfig(); // остаток после аварийного завершения
+  }
+
+  /** Конфиг с паролем лежит на диске только на время запуска ядра. */
+  wipeConfig() {
+    try { if (fs.existsSync(this.cfgPath)) { fs.writeFileSync(this.cfgPath, ''); fs.unlinkSync(this.cfgPath); } } catch {}
   }
 
   setState(state, extra = {}) {
@@ -57,7 +64,7 @@ class Tunnel extends EventEmitter {
       return r.address;
     } catch (e) {
       // Если kill switch уже активен (например, после сбоя), DNS заблокирован — берём кэш
-      if (s.cachedIp) { this.log(`Не удалось разрешить ${s.host} (${e.message}), использую сохранённый IP ${s.cachedIp}`); return s.cachedIp; }
+      if (s.cachedIp && net.isIP(s.cachedIp)) { this.log(`Не удалось разрешить ${s.host} (${e.message}), использую сохранённый IP ${s.cachedIp}`); return s.cachedIp; }
       throw new Error(`Не удалось получить IP прокси ${s.host}: ${e.message}`);
     }
   }
@@ -92,10 +99,11 @@ class Tunnel extends EventEmitter {
         username: settings.username, password: settings.password,
         allowLan: settings.allowLan, dnsServer: settings.dnsServer,
       });
-      this.cfgPath = path.join(this.workDir, 'config.json');
-      fs.writeFileSync(this.cfgPath, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+      this.cfgJson = JSON.stringify(cfg, null, 2); // только в памяти
 
       await this.startCore();
+      this.proxyIp = proxyIp;
+      await this.resetOldConnections();
       this.setState('on');
       await this.runLeakTest();
     } catch (e) {
@@ -114,6 +122,7 @@ class Tunnel extends EventEmitter {
   spawnCore() {
     return new Promise((resolve, reject) => {
       this.log('Запускаю ядро sing-box…');
+      fs.writeFileSync(this.cfgPath, this.cfgJson, { mode: 0o600 });
       const p = spawn(this.corePath, ['run', '-c', this.cfgPath, '-D', this.workDir],
         { windowsHide: true, cwd: path.dirname(this.corePath) });
       this.proc = p;
@@ -131,15 +140,16 @@ class Tunnel extends EventEmitter {
           const safe = this.settings?.password ? clean.split(this.settings.password).join('***') : clean;
           this.log(safe);
           if (/FATAL/.test(safe)) fatal = safe.replace(/^.*FATAL\S*\s*(\[\d+\]\s*)?/, '');
-          if (!started && /sing-box started/i.test(line)) { started = true; clearTimeout(timer); resolve(); }
+          if (!started && /sing-box started/i.test(line)) { started = true; clearTimeout(timer); this.wipeConfig(); resolve(); }
         }
       };
       // Потоки читаем постоянно, иначе переполненный буфер подвесит ядро
       p.stdout.on('data', onData);
       p.stderr.on('data', onData);
-      p.on('error', (e) => { clearTimeout(timer); if (!started) reject(e); });
+      p.on('error', (e) => { clearTimeout(timer); this.wipeConfig(); if (!started) reject(e); });
       p.on('exit', (code) => {
         clearTimeout(timer);
+        this.wipeConfig();
         if (this.proc === p) this.proc = null;
         if (!started) { reject(new Error(explainFatal(fatal) || `Ядро завершилось с кодом ${code} — смотрите журнал`)); return; }
         if (!this.stopping && myGen === this.gen) this.onCrash(code);
@@ -172,9 +182,22 @@ class Tunnel extends EventEmitter {
     if (this.proc) { try { this.proc.kill(); } catch {} this.proc = null; }
   }
 
+  /** Закрыть соединения, открытые до туннеля (они шли бы мимо него с реальным IP). */
+  async resetOldConnections() {
+    try {
+      const phys = leak.physicalAddresses().map((a) => a.address);
+      const n = await firewall.resetDirectConnections({ phys, proxyIp: this.proxyIp, allowLan: this.settings.allowLan });
+      if (n) this.log(`Сброшено соединений, открытых до подключения: ${n}. Программы переподключатся уже через туннель.`);
+    } catch (e) { this.log(`Не удалось сбросить старые соединения: ${e.message}`); }
+  }
+
   async runLeakTest() {
     this.log('Проверяю утечки…');
-    this.leakResults = await leak.runAll(this.real, { udpExpected: supportsUdp(this.settings?.protocol) });
+    this.leakResults = await leak.runAll(this.real, {
+      udpExpected: supportsUdp(this.settings?.protocol),
+      proxyIp: this.proxyIp,
+      allowLan: this.settings?.allowLan,
+    });
     for (const r of this.leakResults) this.log(`${r.ok ? '✔' : '✖'} ${r.name}: ${r.detail}`);
     this.emit('state', this.snapshot());
     return this.leakResults;
@@ -197,6 +220,7 @@ class Tunnel extends EventEmitter {
   }
 
   async _disconnect() {
+    this.cfgJson = '';
     this.stopping = true;
     this.gen += 1;
     this.killCore();

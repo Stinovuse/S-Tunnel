@@ -96,6 +96,8 @@ ${STATE_PS}
 $svc = Get-Service MpsSvc
 if ($svc.Status -ne 'Running') { throw 'Служба «Брандмауэр Защитника Windows» не запущена (возможно, её отключил сторонний антивирус). Без неё защита от утечек невозможна.' }
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
+# Писать в папку состояния могут только Администраторы и SYSTEM
+& icacls.exe $dir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' 2>&1 | Out-Null
 if (-not (Test-Path $state)) {
   $profiles = @(Get-NetFirewallProfile -PolicyStore PersistentStore | ForEach-Object {
     @{ Name = [string]$_.Name; Enabled = [string]$_.Enabled; DefaultOutboundAction = [string]$_.DefaultOutboundAction } })
@@ -122,13 +124,22 @@ async function disable() {
 ${STATE_PS}
 Remove-NetFirewallRule -Group '${GROUP}' -ErrorAction SilentlyContinue
 if (Test-Path $state) {
-  $s = Get-Content -Raw -Path $state | ConvertFrom-Json
+  $s = $null
+  try { $s = Get-Content -Raw -Path $state | ConvertFrom-Json } catch {}
+  # Файлу не доверяем вслепую: восстанавливаем только допустимые значения.
+  # Брандмауэр по этому файлу никогда не ВЫКЛЮЧАЕТСЯ (Enabled=False игнорируется).
   foreach ($p in @($s.profiles)) {
-    if ($p -and $p.Name) {
-      Set-NetFirewallProfile -Name $p.Name -Enabled $p.Enabled -DefaultOutboundAction $p.DefaultOutboundAction -ErrorAction SilentlyContinue
+    if ($p -and @('Domain','Private','Public') -contains $p.Name -and
+        @('Allow','Block','NotConfigured') -contains $p.DefaultOutboundAction) {
+      Set-NetFirewallProfile -Name $p.Name -DefaultOutboundAction $p.DefaultOutboundAction -ErrorAction SilentlyContinue
     }
   }
-  $names = @(@($s.rules) | Where-Object { $_ }); if ($names.Count) { Enable-NetFirewallRule -Name $names -ErrorAction SilentlyContinue }
+  $names = @(@($s.rules) | Where-Object { $_ -is [string] -and $_ })
+  if ($names.Count) {
+    $ok = @(Get-NetFirewallRule -PolicyStore PersistentStore -Direction Outbound -Action Allow -Enabled False -ErrorAction SilentlyContinue |
+      Where-Object { $names -contains $_.Name } | ForEach-Object { $_.Name })
+    if ($ok.Count) { Enable-NetFirewallRule -Name $ok -ErrorAction SilentlyContinue }
+  }
   Remove-Item -Force -Path $state -ErrorAction SilentlyContinue
 } else {
   Get-NetFirewallProfile -PolicyStore PersistentStore | Where-Object { $_.DefaultOutboundAction -eq 'Block' } |
@@ -158,6 +169,63 @@ Get-NetIPAddress -InterfaceAlias 'STunnel' -ErrorAction SilentlyContinue |
   try { await runPs(script, 30000); } catch { /* не критично: ядро само сообщит об ошибке */ }
 }
 
+// ---- Соединения, открытые ДО подключения туннеля ----
+// Новый маршрут не действует на уже установленные TCP-соединения: они привязаны к
+// адресу физического адаптера и продолжают идти мимо туннеля с реальным IP.
+const PRIVATE_RE = String.raw`^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|fe80:|f[cd][0-9a-f]{2}:)`;
+
+function directConnFilter(o) {
+  const phys = o.phys.length ? qList(o.phys) : "''";
+  return `
+$phys = @(${phys})
+$proxy = ${q(o.proxyIp)}
+$conns = @(Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | Where-Object {
+  ($phys -contains $_.LocalAddress) -and ($_.RemoteAddress -ne $proxy) -and
+  ($_.RemoteAddress -notmatch '^(127\\.|::1$)') ${o.allowLan ? `-and ($_.RemoteAddress -notmatch '${PRIVATE_RE}')` : ''}
+})`;
+}
+
+/**
+ * Принудительно закрывает (DELETE_TCB) IPv4-соединения, идущие мимо туннеля.
+ * Программы переподключатся — уже через туннель. Для IPv6 Windows такого API не даёт,
+ * но новые IPv6-соединения мимо туннеля и так заблокированы брандмауэром.
+ * @returns {Promise<number>} сколько соединений сброшено
+ */
+async function resetDirectConnections(o) {
+  const script = `${directConnFilter(o)}
+Add-Type -Namespace STunnel -Name Tcp -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)]
+public struct MIB_TCPROW { public uint dwState; public uint dwLocalAddr; public uint dwLocalPort; public uint dwRemoteAddr; public uint dwRemotePort; }
+[DllImport("iphlpapi.dll")]
+public static extern uint SetTcpEntry(ref MIB_TCPROW row);
+'@
+function AddrU([string]$ip) { [BitConverter]::ToUInt32(([Net.IPAddress]::Parse($ip)).GetAddressBytes(), 0) }
+function PortU([int]$p) { [uint32]((($p -shr 8) -band 0xFF) -bor (($p -band 0xFF) -shl 8)) }
+$n = 0
+foreach ($c in $conns) {
+  if ($c.LocalAddress -notmatch '^\\d+\\.\\d+\\.\\d+\\.\\d+$') { continue }
+  $row = New-Object STunnel.Tcp+MIB_TCPROW
+  $row.dwState = 12
+  $row.dwLocalAddr = AddrU $c.LocalAddress; $row.dwLocalPort = PortU $c.LocalPort
+  $row.dwRemoteAddr = AddrU $c.RemoteAddress; $row.dwRemotePort = PortU $c.RemotePort
+  if ([STunnel.Tcp]::SetTcpEntry([ref]$row) -eq 0) { $n++ }
+}
+"$n"`;
+  return parseInt(await runPs(script, 60000), 10) || 0;
+}
+
+/** Список соединений, всё ещё идущих мимо туннеля: [{proc, remote}] */
+async function listDirectConnections(o) {
+  const script = `${directConnFilter(o)}
+$out = foreach ($c in $conns) {
+  $name = (Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue).ProcessName
+  [pscustomobject]@{ proc = [string]$name; remote = "$($c.RemoteAddress):$($c.RemotePort)" }
+}
+ConvertTo-Json -Compress -InputObject @($out)`;
+  const r = await runPs(script, 60000);
+  try { const j = JSON.parse(r || '[]'); return Array.isArray(j) ? j : [j]; } catch { return []; }
+}
+
 async function isAdmin() {
   try {
     const r = await runPs(`([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)`, 20000);
@@ -165,4 +233,4 @@ async function isAdmin() {
   } catch { return false; }
 }
 
-module.exports = { enable, disable, isActive, isAdmin, cleanupTunAddresses, cleanClixml, runPs, GROUP };
+module.exports = { enable, disable, resetDirectConnections, listDirectConnections, isActive, isAdmin, cleanupTunAddresses, cleanClixml, runPs, GROUP };

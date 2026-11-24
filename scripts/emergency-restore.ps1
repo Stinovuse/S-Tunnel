@@ -5,11 +5,22 @@ Get-Process sing-box -ErrorAction SilentlyContinue | Stop-Process -Force
 Remove-NetFirewallRule -Group 'STunnel' -ErrorAction SilentlyContinue
 $state = Join-Path $env:ProgramData 'STunnel\killswitch.json'
 if (Test-Path $state) {
-  $s = Get-Content -Raw -Path $state | ConvertFrom-Json
+  $s = $null
+  try { $s = Get-Content -Raw -Path $state | ConvertFrom-Json } catch {}
+  # Файлу не доверяем вслепую: восстанавливаем только допустимые значения.
+  # Брандмауэр по этому файлу никогда не ВЫКЛЮЧАЕТСЯ (Enabled=False игнорируется).
   foreach ($p in @($s.profiles)) {
-    if ($p -and $p.Name) { Set-NetFirewallProfile -Name $p.Name -Enabled $p.Enabled -DefaultOutboundAction $p.DefaultOutboundAction }
+    if ($p -and @('Domain','Private','Public') -contains $p.Name -and
+        @('Allow','Block','NotConfigured') -contains $p.DefaultOutboundAction) {
+      Set-NetFirewallProfile -Name $p.Name -DefaultOutboundAction $p.DefaultOutboundAction -ErrorAction SilentlyContinue
+    }
   }
-  $names = @(@($s.rules) | Where-Object { $_ }); if ($names.Count) { Enable-NetFirewallRule -Name $names -ErrorAction SilentlyContinue }
+  $names = @(@($s.rules) | Where-Object { $_ -is [string] -and $_ })
+  if ($names.Count) {
+    $ok = @(Get-NetFirewallRule -PolicyStore PersistentStore -Direction Outbound -Action Allow -Enabled False -ErrorAction SilentlyContinue |
+      Where-Object { $names -contains $_.Name } | ForEach-Object { $_.Name })
+    if ($ok.Count) { Enable-NetFirewallRule -Name $ok -ErrorAction SilentlyContinue }
+  }
   Remove-Item -Force -Path $state -ErrorAction SilentlyContinue
   Write-Host 'Правила брандмауэра восстановлены из сохранённого состояния.'
 } else {

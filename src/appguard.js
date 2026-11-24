@@ -10,7 +10,7 @@ const { EventEmitter } = require('events');
 const { spawn } = require('child_process');
 const path = require('path');
 const firewall = require('./firewall');
-const { scanDir, lc, isInside } = require('./appscan');
+const { scanDir, lc, isInside, pkgPathRegex } = require('./appscan');
 
 const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
 const RESCAN_MS = 10 * 60 * 1000;
@@ -19,7 +19,8 @@ class AppGuard extends EventEmitter {
   /**
    * @param {object} o
    * @param {import('./tunnel').Tunnel} o.tunnel
-   * @param {() => Array<{type:'dir'|'exe', path:string, name:string}>} o.getApps
+   * @param {() => Array<{type:'dir'|'exe'|'pkg', path:string, name:string}>} o.getApps
+   *   type 'pkg': path = имя семейства пакета MSIX (например Claude_pzs8sxrjxfjjc)
    * @param {(app:{name:string}) => void} o.onBlocked
    */
   constructor({ tunnel, getApps, onBlocked }) {
@@ -36,33 +37,53 @@ class AppGuard extends EventEmitter {
   }
 
   /** Развернуть список в конкретные .exe (с кэшем). */
-  targets(force = false) {
+  async targets(force = false) {
     const apps = this.getApps();
     const key = JSON.stringify(apps.map((a) => [a.type, a.path]));
     if (!force && this.cache && this.cache.key === key && Date.now() - this.cache.at < RESCAN_MS) return this.cache;
     const exes = new Map();
     const dirs = [];
+    const pkgRes = [];
     const counts = {};
+    const pfns = apps.filter((a) => a.type === 'pkg').map((a) => a.path);
+    const located = pfns.length ? await firewall.resolvePackages(pfns).catch(() => ({})) : {};
     for (const a of apps) {
       if (a.type === 'dir') {
         dirs.push(a.path);
         const { exes: found, truncated } = scanDir(a.path);
         counts[a.path] = { n: found.length, truncated };
         for (const e of found) exes.set(lc(e), e);
+      } else if (a.type === 'pkg') {
+        const rx = pkgPathRegex(a.path);
+        if (rx) pkgRes.push(rx);
+        let n = 0;
+        const locs = [].concat(located[a.path] || []);
+        for (const d of locs) {
+          dirs.push(d);
+          let found = scanDir(d, { allowPackaged: true }).exes;
+          if (!found.length) found = await firewall.listExesInDir(d).catch(() => []);
+          for (const e of found) exes.set(lc(e), e);
+          n += found.length;
+        }
+        counts[a.path] = { n: locs.length ? n : null, truncated: false, missing: !locs.length };
       } else {
         exes.set(lc(a.path), a.path);
         counts[a.path] = { n: 1, truncated: false };
       }
     }
-    this.cache = { key, at: Date.now(), exes: [...exes.values()], dirs, counts };
+    this.cache = { key, at: Date.now(), exes: [...exes.values()], dirs, pkgRes, counts };
     return this.cache;
   }
 
-  counts() { return this.targets().counts; }
+  counts() { return this.cache ? this.cache.counts : {}; }
 
   findApp(exePath) {
     const l = lc(exePath);
-    return this.getApps().find((a) => (a.type === 'dir' ? isInside(l, lc(a.path)) : l === lc(a.path)));
+    return this.getApps().find((a) => {
+      if (a.type === 'dir') return isInside(l, lc(a.path));
+      if (a.type === 'pkg') { const rx = pkgPathRegex(a.path); return !!rx && new RegExp(rx, 'i').test(l); }
+      return l === lc(a.path);
+    });
   }
 
   /** Привести правила и процессы в соответствие с состоянием туннеля (по очереди). */
@@ -73,7 +94,7 @@ class AppGuard extends EventEmitter {
   }
 
   async _sync(state, rescan) {
-    const t = this.targets(rescan);
+    const t = await this.targets(rescan);
     this.restartWatcher(t);
     const block = state !== 'on';
     await firewall.syncAppRules(t.exes, block);
@@ -82,7 +103,7 @@ class AppGuard extends EventEmitter {
 
   /** ПЕРЕД снятием kill switch: сначала блок приложений, потом обычный интернет. */
   async beforeRestore() {
-    const t = this.targets();
+    const t = await this.targets();
     await firewall.syncAppRules(t.exes, true);
     await this.closeRunning(t);
   }
@@ -100,11 +121,12 @@ class AppGuard extends EventEmitter {
   restartWatcher(t) {
     const names = [...new Set(t.exes.map((e) => path.win32.basename(e).toLowerCase()))];
     const dirs = t.dirs.map(lc);
-    const key = JSON.stringify([names, dirs]);
+    const pkgRes = t.pkgRes || [];
+    const key = JSON.stringify([names, dirs, pkgRes]);
     if (key === this.watchKey && this.watcher) return;
     this.stopWatcher();
     this.watchKey = key;
-    if ((!names.length && !dirs.length) || process.platform !== 'win32') return;
+    if ((!names.length && !dirs.length && !pkgRes.length) || process.platform !== 'win32') return;
 
     // Если есть папки — смотрим все запуски (новая версия приложения может иметь новое имя .exe)
     const query = dirs.length
@@ -116,6 +138,7 @@ $ErrorActionPreference = 'Stop'
 $names = New-Object 'System.Collections.Generic.HashSet[string]'
 foreach ($n in @(${names.map(q).join(',')})) { [void]$names.Add($n) }
 $dirs = @(${dirs.map(q).join(',')})
+$pkgRes = @(${pkgRes.map(q).join(',')})
 Register-CimIndicationEvent -Query ${q(query)} -SourceIdentifier stunnel_start | Out-Null
 while ($true) {
   $e = Wait-Event -SourceIdentifier stunnel_start
@@ -123,12 +146,13 @@ while ($true) {
   Remove-Event -EventIdentifier $e.EventIdentifier
   $procId = $ev.ProcessID
   $isName = $names.Contains(([string]$ev.ProcessName).ToLower())
-  if (-not $isName -and $dirs.Count -eq 0) { continue }
+  if (-not $isName -and $dirs.Count -eq 0 -and $pkgRes.Count -eq 0) { continue }
   $p = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction SilentlyContinue
   if (-not $p -or -not $p.ExecutablePath) { continue }
   $l = $p.ExecutablePath.ToLower()
   $hit = $isName
   if (-not $hit) { foreach ($d in $dirs) { if ($l.StartsWith($d + '\\')) { $hit = $true; break } } }
+  if (-not $hit) { foreach ($rx in $pkgRes) { if ($l -match $rx) { $hit = $true; break } } }
   if ($hit) { [Console]::Out.WriteLine("$procId|$($p.ExecutablePath)"); [Console]::Out.Flush() }
 }`;
     const enc = Buffer.from(script, 'utf16le').toString('base64');

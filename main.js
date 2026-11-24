@@ -7,7 +7,7 @@ const { PROTOCOLS } = require('./src/core-config');
 const firewall = require('./src/firewall');
 const { Updater } = require('./src/updater');
 const { AppGuard } = require('./src/appguard');
-const { validateAppPath, validateAppDir, lc } = require('./src/appscan');
+const { validateAppPath, validateAppDir, validatePfn, lc } = require('./src/appscan');
 
 if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
 
@@ -35,9 +35,14 @@ function loadSettings() {
   // элементы: {type:'dir'|'exe', path, name}; старые записи (без type) — это .exe
   s.guardedApps = (Array.isArray(s.guardedApps) ? s.guardedApps : [])
     .filter((a) => a && typeof a.path === 'string')
-    .map((a) => ({ type: a.type === 'dir' ? 'dir' : 'exe', path: a.path, name: String(a.name || path.basename(a.path)) }))
-    .filter((a) => !(a.type === 'dir' ? validateAppDir(a.path) : validateAppPath(a.path)));
+    .map((a) => ({ type: ['dir', 'pkg'].includes(a.type) ? a.type : 'exe', path: a.path, name: String(a.name || path.basename(a.path)) }))
+    .filter((a) => !validateEntry(a));
   return s;
+}
+function validateEntry(e) {
+  if (e.type === 'dir') return validateAppDir(e.path);
+  if (e.type === 'pkg') return validatePfn(e.path);
+  return validateAppPath(e.path);
 }
 function saveSettings(s) {
   fs.mkdirSync(userDir, { recursive: true });
@@ -199,14 +204,16 @@ function appsView() {
   const s = loadSettings();
   let counts = {};
   try { counts = guard.counts(); } catch {}
-  return s.guardedApps.map((a) => ({ ...a, count: counts[a.path]?.n ?? null, truncated: !!counts[a.path]?.truncated }));
+  return s.guardedApps.map((a) => ({
+    ...a, count: counts[a.path]?.n ?? null, truncated: !!counts[a.path]?.truncated, missing: !!counts[a.path]?.missing,
+  }));
 }
 
 async function addApps(entries) {
   const s = loadSettings();
   const errors = [];
   for (const e of entries) {
-    const err = e.type === 'dir' ? validateAppDir(e.path) : validateAppPath(e.path);
+    const err = validateEntry(e);
     if (err) { errors.push(`${e.name}: ${err}`); continue; }
     if (s.guardedApps.some((a) => lc(a.path) === lc(e.path))) continue;
     s.guardedApps.push({ type: e.type, path: e.path, name: e.name });
@@ -232,12 +239,18 @@ ipcMain.handle('apps-installed', async () => {
     const k = lc(entry.path);
     if (!byDir.has(k) || r.name.length < byDir.get(k).name.length) byDir.set(k, entry);
   }
+  // Приложения-пакеты MSIX / Microsoft Store (например Claude Desktop): своих ярлыков .lnk у них нет
+  const pkgs = await firewall.listPackagedApps().catch(() => []);
+  for (const p of pkgs) {
+    if (!p || !p.pfn || validatePfn(p.pfn)) continue;
+    byDir.set(`pkg:${p.pfn.toLowerCase()}`, { type: 'pkg', path: p.pfn, name: p.name || p.pfn, where: p.dir });
+  }
   return [...byDir.values()].sort((a, b) => a.name.localeCompare(b.name, 'ru'));
 });
 
 ipcMain.handle('apps-add-entries', (_e, entries) => addApps(
   (Array.isArray(entries) ? entries : []).filter((x) => x && typeof x.path === 'string')
-    .map((x) => ({ type: x.type === 'dir' ? 'dir' : 'exe', path: x.path, name: String(x.name || path.basename(x.path)) }))));
+    .map((x) => ({ type: ['dir', 'pkg'].includes(x.type) ? x.type : 'exe', path: x.path, name: String(x.name || path.basename(x.path)) }))));
 
 ipcMain.handle('apps-add-folder', async () => {
   const r = await dialog.showOpenDialog(win, { title: 'Папка, в которой установлено приложение', properties: ['openDirectory'] });

@@ -109,10 +109,10 @@ function renderApps(apps) {
     const info = document.createElement('div');
     const n = document.createElement('b'); n.textContent = a.name;
     const p = document.createElement('span');
-    if (a.type === 'dir') {
-      const c = a.count == null ? '' : ` · ${a.count}${a.truncated ? '+' : ''} ${plural(a.count, 'программа', 'программы', 'программ')}`;
-      p.textContent = `Приложение целиком${c} — ${a.path}`;
-    } else p.textContent = `Только этот .exe — ${a.path}`;
+    const c = a.count == null ? '' : ` · ${a.count}${a.truncated ? '+' : ''} ${plural(a.count, 'программа', 'программы', 'программ')}`;
+    if (a.type === 'dir') p.textContent = `Приложение целиком${c} — ${a.path}`;
+    else if (a.type === 'pkg') p.textContent = a.missing ? `Пакет ${a.path} — сейчас не установлен` : `Приложение целиком (пакет MSIX/Store)${c}`;
+    else p.textContent = `Только этот .exe — ${a.path}`;
     p.title = a.path;
     info.append(n, p);
     const rm = document.createElement('button'); rm.className = 'small link'; rm.textContent = 'Убрать';
@@ -144,7 +144,9 @@ function renderPicker() {
     cb.onchange = () => { cb.checked ? picked.add(a.path) : picked.delete(a.path); $('pkAdd').disabled = !picked.size; };
     const info = document.createElement('div');
     const n = document.createElement('b'); n.textContent = a.name;
-    const p = document.createElement('span'); p.textContent = a.path; p.title = a.path;
+    const p = document.createElement('span');
+    p.textContent = a.type === 'pkg' ? `Пакет MSIX/Store · ${a.path}` : a.path;
+    p.title = a.where || a.path;
     info.append(n, p);
     const label = document.createElement('label'); label.className = 'pickrow';
     label.append(cb, info); li.append(label); ul.append(li);

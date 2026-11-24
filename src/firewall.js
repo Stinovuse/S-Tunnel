@@ -290,6 +290,52 @@ ConvertTo-Json -Compress -InputObject @($out)`, 120000);
   try { const j = JSON.parse(r || '[]'); return Array.isArray(j) ? j : [j]; } catch { return []; }
 }
 
+/** Установленные приложения-пакеты (MSIX/Store, не системные) -> [{name, pfn, dir}] */
+async function listPackagedApps() {
+  const r = await runPs(`$names = @{}
+try {
+  foreach ($a in @(Get-StartApps)) {
+    if ($a.AppID -like '*!*') { $pfn = $a.AppID.Split('!')[0]; if (-not $names.ContainsKey($pfn)) { $names[$pfn] = $a.Name } }
+  }
+} catch {}
+$seen = @{}
+$out = foreach ($p in @(Get-AppxPackage -AllUsers -PackageTypeFilter Main -ErrorAction SilentlyContinue)) {
+  if ($p.IsFramework -or $p.SignatureKind -eq 'System' -or -not $p.InstallLocation) { continue }
+  if ($seen.ContainsKey($p.PackageFamilyName)) { continue }
+  $seen[$p.PackageFamilyName] = $true
+  $n = $names[$p.PackageFamilyName]
+  if (-not $n) {
+    try { $d = [string](Get-AppxPackageManifest -Package $p.PackageFullName -ErrorAction Stop).Package.Properties.DisplayName } catch { $d = '' }
+    $n = if ($d -and $d -notlike 'ms-resource*') { $d } else { $p.Name }
+  }
+  [pscustomobject]@{ name = [string]$n; pfn = [string]$p.PackageFamilyName; dir = [string]$p.InstallLocation }
+}
+ConvertTo-Json -Compress -InputObject @($out)`, 180000);
+  try { const j = JSON.parse(r || '[]'); return Array.isArray(j) ? j : [j]; } catch { return []; }
+}
+
+/** Текущие папки установки пакетов (после обновления путь меняется) -> {pfn: [dir,...]} */
+async function resolvePackages(pfns) {
+  if (!pfns.length) return {};
+  const r = await runPs(`$want = @(${pfns.map(q).join(',')})
+$res = @{}
+foreach ($p in @(Get-AppxPackage -AllUsers -PackageTypeFilter Main -ErrorAction SilentlyContinue)) {
+  if ($want -contains $p.PackageFamilyName -and $p.InstallLocation) {
+    if (-not $res.ContainsKey($p.PackageFamilyName)) { $res[$p.PackageFamilyName] = @() }
+    if ($res[$p.PackageFamilyName] -notcontains $p.InstallLocation) { $res[$p.PackageFamilyName] += [string]$p.InstallLocation }
+  }
+}
+ConvertTo-Json -Compress -Depth 3 -InputObject $res`, 120000);
+  try { return JSON.parse(r || '{}') || {}; } catch { return {}; }
+}
+
+/** .exe внутри папки пакета (WindowsApps читаем силами PowerShell от администратора). */
+async function listExesInDir(dir) {
+  const r = await runPs(`$out = @(Get-ChildItem -LiteralPath ${q(dir)} -Recurse -Filter *.exe -File -ErrorAction SilentlyContinue | Select-Object -First 400 | ForEach-Object { $_.FullName })
+ConvertTo-Json -Compress -InputObject $out`, 120000);
+  try { const j = JSON.parse(r || '[]'); return Array.isArray(j) ? j : [j]; } catch { return []; }
+}
+
 async function isAdmin() {
   try {
     const r = await runPs(`([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)`, 20000);
@@ -297,4 +343,4 @@ async function isAdmin() {
   } catch { return false; }
 }
 
-module.exports = { syncAppRules, stopAppProcesses, listStartMenuApps, APPS_GROUP, enable, disable, resetDirectConnections, listDirectConnections, isActive, isAdmin, cleanupTunAddresses, cleanClixml, runPs, GROUP };
+module.exports = { listPackagedApps, resolvePackages, listExesInDir, syncAppRules, stopAppProcesses, listStartMenuApps, APPS_GROUP, enable, disable, resetDirectConnections, listDirectConnections, isActive, isAdmin, cleanupTunAddresses, cleanClixml, runPs, GROUP };

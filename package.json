@@ -1,7 +1,7 @@
 {
   "name": "s-tunnel",
   "productName": "S Tunnel",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Весь трафик Windows через личный HTTP/HTTPS-прокси без утечек реального IP",
   "main": "main.js",
   "private": true,
@@ -17,10 +17,22 @@
   "build": {
     "appId": "com.stinovuse.stunnel",
     "productName": "S Tunnel",
-    "files": ["main.js", "preload.js", "src/**", "renderer/**", "assets/**"],
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**",
+      "renderer/**",
+      "assets/**"
+    ],
     "extraResources": [
-      { "from": "bin", "to": "bin" },
-      { "from": "scripts", "to": "scripts" }
+      {
+        "from": "bin",
+        "to": "bin"
+      },
+      {
+        "from": "scripts",
+        "to": "scripts"
+      }
     ],
     "win": {
       "target": "nsis",
@@ -33,6 +45,16 @@
       "allowToChangeInstallationDirectory": true,
       "shortcutName": "S Tunnel",
       "artifactName": "S-Tunnel-Setup-${version}.${ext}"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Stinovuse",
+        "repo": "S-Tunnel"
+      }
+    ]
+  },
+  "dependencies": {
+    "electron-updater": "^6.6.2"
   }
 }

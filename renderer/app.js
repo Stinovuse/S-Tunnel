@@ -90,6 +90,31 @@ $('test').onclick = async () => {
   await api.leakTest();
   $('test').disabled = false; $('test').textContent = 'Проверить';
 };
+let upd = { state: 'idle' };
+function renderUpdate(u) {
+  upd = u;
+  $('appVersion').textContent = `версия ${u.version}`;
+  const btn = $('updBtn'); btn.disabled = false;
+  const map = {
+    idle: ['Проверяется автоматически, когда туннель включён', 'Проверить'],
+    checking: ['Проверяю…', null],
+    latest: ['Установлена последняя версия', 'Проверить'],
+    available: [`Доступна версия ${u.available}`, 'Скачать'],
+    downloading: [`Скачиваю… ${u.percent || 0}%`, null],
+    ready: [`Версия ${u.available} скачана`, 'Установить и перезапустить'],
+    error: [u.error || 'Ошибка', 'Проверить'],
+  };
+  const [text, label] = map[u.state] || map.idle;
+  $('updText').textContent = text;
+  if (label) { btn.textContent = label; btn.classList.remove('hidden'); } else btn.classList.add('hidden');
+}
+$('updBtn').onclick = () => {
+  if (upd.state === 'available') api.updateDownload();
+  else if (upd.state === 'ready') api.updateInstall();
+  else api.updateCheck();
+};
+api.onUpdate(renderUpdate);
+
 $('emergency').onclick = () => api.openEmergency();
 
 api.onState(renderState);
@@ -100,6 +125,7 @@ api.init().then((d) => {
   fillSettings(d.settings);
   renderState(d.status);
   d.log.forEach(addLog);
+  renderUpdate(d.update);
   if (d.killSwitchLeft) {
     const b = $('banner');
     b.textContent = 'Kill switch остался включён после прошлого сбоя — интернет заблокирован. Подключитесь или нажмите «Отключить».';

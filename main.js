@@ -5,6 +5,7 @@ const fs = require('fs');
 const { Tunnel } = require('./src/tunnel');
 const { PROTOCOLS } = require('./src/core-config');
 const firewall = require('./src/firewall');
+const { Updater } = require('./src/updater');
 
 if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
 
@@ -51,6 +52,12 @@ const logBuf = [];
 const tunnel = new Tunnel({ corePath, workDir: path.join(userDir, 'core') });
 
 const send = (ch, data) => { if (win && !win.isDestroyed()) win.webContents.send(ch, data); };
+let updating = false;
+const updater = new Updater({
+  tunnel,
+  send: (ch, d) => { send(ch, d); if (d.state === 'ready') updateTray(); },
+  log: (l) => tunnel.log(l),
+});
 
 tunnel.on('log', (line) => {
   const l = `[${new Date().toLocaleTimeString()}] ${line}`;
@@ -81,6 +88,8 @@ function updateTray(state = tunnel.state) {
     { label: 'Подключить', enabled: state !== 'on' && state !== 'connecting', click: () => doConnect() },
     { label: 'Отключить (вернуть обычный интернет)', enabled: state !== 'off', click: () => doDisconnect() },
     { type: 'separator' },
+    ...(updater.status.state === 'ready'
+      ? [{ label: `Установить обновление ${updater.status.available}`, click: showWindow }] : []),
     { label: 'Выход', click: () => { quitting = true; app.quit(); } },
   ]));
 }
@@ -131,6 +140,7 @@ ipcMain.handle('get-init', async () => ({
   settings: publicSettings(loadSettings()),
   status: tunnel.snapshot(),
   log: logBuf,
+  update: updater.status,
   killSwitchLeft: tunnel.state === 'off' ? await firewall.isActive().catch(() => false) : false,
 }));
 
@@ -158,6 +168,13 @@ ipcMain.handle('save-settings', (_e, inc) => {
 ipcMain.handle('connect', () => doConnect());
 ipcMain.handle('disconnect', () => doDisconnect());
 ipcMain.handle('leak-test', () => tunnel.state === 'on' ? tunnel.runLeakTest() : []);
+ipcMain.handle('update-check', () => updater.check());
+ipcMain.handle('update-download', () => updater.download());
+ipcMain.handle('update-install', () => updater.install(() => {
+  updating = true;
+  tunnel.log('Устанавливаю обновление. Интернет заблокирован до переподключения — утечки нет.');
+  tunnel.suspend();
+}));
 ipcMain.handle('open-emergency', () => shell.showItemInFolder(emergencyScript));
 
 app.on('second-instance', showWindow);
@@ -173,13 +190,17 @@ app.whenReady().then(async () => {
     dialog.showErrorBox('S Tunnel', 'Нужны права администратора (TUN-адаптер и брандмауэр). Запустите приложение от имени администратора.');
   }
   const s = loadSettings();
-  if (s.autoConnect && s.host) doConnect();
+  const afterUpdate = updater.consumeReconnectFlag();
+  if (afterUpdate) tunnel.log(`Обновлено до версии ${app.getVersion()}. Переподключаюсь…`);
+  if ((s.autoConnect || afterUpdate) && s.host) doConnect();
+  updater.start();
 });
 
 // При выходе ВСЕГДА пытаемся вернуть систему в исходное состояние
 app.on('before-quit', async (e) => {
   quitting = true;
-  if (tunnel.state === 'off' || app.__cleaned) return;
+  // при обновлении НЕ снимаем kill switch: новая версия сама переподключится
+  if (updating || tunnel.state === 'off' || app.__cleaned) return;
   e.preventDefault();
   try { await tunnel.disconnect(); } catch { /* kill switch останется — это безопасно */ }
   app.__cleaned = true;

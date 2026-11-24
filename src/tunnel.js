@@ -172,6 +172,13 @@ class Tunnel extends EventEmitter {
     return this.leakResults;
   }
 
+  /** Остановить ядро, но оставить kill switch (используется при установке обновления). */
+  suspend() {
+    this.stopping = true;
+    this.gen += 1;
+    this.killCore();
+  }
+
   /** Полное отключение: ядро стоп + восстановление правил брандмауэра. */
   async disconnect() {
     this.stopping = true;

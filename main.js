@@ -74,17 +74,20 @@ const updater = new Updater({
 // ---- «Только через S Tunnel» ----
 const lastNotified = new Map();
 const guard = new AppGuard({
-  tunnel,
+  guardScript: app.isPackaged
+    ? path.join(process.resourcesPath, 'scripts', 'guard.ps1')
+    : path.join(__dirname, 'scripts', 'guard.ps1'),
+  log: (l) => tunnel.log(l),
   getApps: () => loadSettings().guardedApps,
   onBlocked: (a) => {
-    tunnel.log(`Закрыта программа ${a.name}: S Tunnel не подключён`);
+    tunnel.log(`Закрыто приложение ${a.name}: туннель не подключён`);
     const now = Date.now();
     if (now - (lastNotified.get(a.path) || 0) < 5000) return;
     lastNotified.set(a.path, now);
     if (Notification.isSupported()) {
       const n = new Notification({
         title: `${a.name} закрыт`,
-        body: 'Эта программа работает только через S Tunnel. Нажмите, чтобы подключиться.',
+        body: 'Это приложение работает только через S Tunnel. Нажмите, чтобы подключиться.',
         icon: path.join(__dirname, 'assets', 'icon.png'),
       });
       n.on('click', () => { showWindow(); doConnect(); });
@@ -219,11 +222,12 @@ async function addApps(entries) {
     s.guardedApps.push({ type: e.type, path: e.path, name: e.name });
   }
   saveSettings(s);
-  await guard.sync(undefined, { rescan: true });
+  await guard.publish();
   return { apps: appsView(), errors };
 }
 
 ipcMain.handle('apps-list', () => appsView());
+ipcMain.handle('guard-status', () => firewall.guardStatus());
 
 // Установленные приложения из меню «Пуск»: приложение = папка, где лежит его программа
 ipcMain.handle('apps-installed', async () => {
@@ -271,7 +275,7 @@ ipcMain.handle('apps-remove', async (_e, p) => {
   const s = loadSettings();
   s.guardedApps = s.guardedApps.filter((a) => lc(a.path) !== lc(p));
   saveSettings(s);
-  await guard.sync(undefined, { rescan: true });
+  await guard.publish();
   return { apps: appsView() };
 });
 
@@ -300,7 +304,7 @@ app.whenReady().then(async () => {
     dialog.showErrorBox('S Tunnel', 'Нужны права администратора (TUN-адаптер и брандмауэр). Запустите приложение от имени администратора.');
   }
   const s = loadSettings();
-  guard.sync().catch((e) => tunnel.log(`Защита программ: ${e.message}`));
+  guard.start().catch((e) => tunnel.log(`Фоновая защита приложений: ${e.message}`));
   const afterUpdate = updater.consumeReconnectFlag();
   if (afterUpdate) tunnel.log(`Обновлено до версии ${app.getVersion()}. Переподключаюсь…`);
   if ((s.autoConnect || afterUpdate) && s.host) doConnect();

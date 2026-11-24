@@ -1,7 +1,7 @@
 {
   "name": "s-tunnel",
   "productName": "S Tunnel",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Весь трафик Windows через личный HTTP/HTTPS-прокси без утечек реального IP",
   "main": "main.js",
   "private": true,

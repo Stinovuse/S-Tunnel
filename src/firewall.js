@@ -227,38 +227,7 @@ ConvertTo-Json -Compress -InputObject @($out)`;
 }
 
 // ---- «Только через S Tunnel» ----
-const APPS_GROUP = 'STunnelApps';
 
-/**
- * Приводит Block-правила группы STunnelApps к списку exes (добавляет недостающие,
- * удаляет лишние) и включает/выключает всю группу одной командой.
- * @param {string[]} exes
- * @param {boolean} enabled  true = блокировать (туннель не включён)
- */
-async function syncAppRules(exes, enabled) {
-  const want = exes.length ? exes.map((p) => q(p)).join(',') : '';
-  return runPs(`$want = @(${want})
-$wantL = @{}; foreach ($w in $want) { $wantL[$w.ToLower()] = $w }
-$have = @{}
-foreach ($f in @(Get-NetFirewallRule -Group '${APPS_GROUP}' -ErrorAction SilentlyContinue | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue)) {
-  $prog = [string]$f.Program
-  if (-not $prog -or -not $wantL.ContainsKey($prog.ToLower()) -or $have.ContainsKey($prog.ToLower())) {
-    Remove-NetFirewallRule -Name $f.InstanceID -ErrorAction SilentlyContinue
-  } else { $have[$prog.ToLower()] = $true }
-}
-$en = ${enabled ? "'True'" : "'False'"}
-foreach ($k in $wantL.Keys) {
-  if (-not $have.ContainsKey($k)) {
-    $p = $wantL[$k]
-    New-NetFirewallRule -DisplayName ('S Tunnel: без туннеля запрещено — ' + (Split-Path $p -Leaf)) -Group '${APPS_GROUP}' -Direction Outbound -Action Block -Program $p -Enabled $en | Out-Null
-  }
-}
-if ($want.Count) {
-  if ($en -eq 'True') { Enable-NetFirewallRule -Group '${APPS_GROUP}' -ErrorAction SilentlyContinue }
-  else { Disable-NetFirewallRule -Group '${APPS_GROUP}' -ErrorAction SilentlyContinue }
-}
-'ok'`, 300000);
-}
 
 /** Закрывает процессы из списка exes и из папок dirs; возвращает пути закрытых. */
 async function stopAppProcesses(exes, dirs) {
@@ -336,6 +305,18 @@ ConvertTo-Json -Compress -InputObject $out`, 120000);
   try { const j = JSON.parse(r || '[]'); return Array.isArray(j) ? j : [j]; } catch { return []; }
 }
 
+/** Состояние фоновой задачи «S Tunnel Guard»: Running / Ready / Disabled / missing */
+async function guardStatus() {
+  try {
+    const r = await runPs(`$t = Get-ScheduledTask -TaskName 'S Tunnel Guard' -ErrorAction SilentlyContinue
+$st = if ($t) { [string]$t.State } else { 'missing' }
+$fw = ((Get-Service MpsSvc).Status -eq 'Running') -and -not (@(Get-NetFirewallProfile | Where-Object { -not $_.Enabled }).Count)
+"$st|$fw"`, 20000);
+    const [task, fw] = r.split('|');
+    return { task: task || 'missing', firewall: fw === 'True' };
+  } catch { return { task: 'unknown', firewall: true }; }
+}
+
 async function isAdmin() {
   try {
     const r = await runPs(`([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)`, 20000);
@@ -343,4 +324,4 @@ async function isAdmin() {
   } catch { return false; }
 }
 
-module.exports = { listPackagedApps, resolvePackages, listExesInDir, syncAppRules, stopAppProcesses, listStartMenuApps, APPS_GROUP, enable, disable, resetDirectConnections, listDirectConnections, isActive, isAdmin, cleanupTunAddresses, cleanClixml, runPs, GROUP };
+module.exports = { listPackagedApps, resolvePackages, listExesInDir, stopAppProcesses, listStartMenuApps, guardStatus, enable, disable, resetDirectConnections, listDirectConnections, isActive, isAdmin, cleanupTunAddresses, cleanClixml, runPs, GROUP };

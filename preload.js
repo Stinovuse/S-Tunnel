@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('stunnel', {
   updateInstall: () => ipcRenderer.invoke('update-install'),
   onUpdate: (cb) => ipcRenderer.on('update', (_e, d) => cb(d)),
   appsList: () => ipcRenderer.invoke('apps-list'),
+  guardStatus: () => ipcRenderer.invoke('guard-status'),
   appsInstalled: () => ipcRenderer.invoke('apps-installed'),
   appsAddEntries: (e) => ipcRenderer.invoke('apps-add-entries', e),
   appsAddFolder: () => ipcRenderer.invoke('apps-add-folder'),

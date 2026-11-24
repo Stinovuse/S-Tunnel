@@ -97,7 +97,20 @@ $('test').onclick = async () => {
 };
 function plural(n, a, b, c) { const m = n % 10, h = n % 100; return m === 1 && h !== 11 ? a : (m >= 2 && m <= 4 && (h < 12 || h > 14) ? b : c); }
 
+const GUARD_TEXT = {
+  Running: '● Фоновая защита работает', Ready: '○ Фоновая защита установлена, но не запущена (запустится вместе с Windows)',
+  Disabled: '✖ Фоновая защита отключена в Планировщике заданий', missing: '✖ Фоновая защита не установлена', unknown: '',
+};
+async function refreshGuard(apps) {
+  if (!apps.length) { $('guardState').textContent = ''; return; }
+  const st = await api.guardStatus().catch(() => ({ task: 'unknown', firewall: true }));
+  let text = GUARD_TEXT[st.task] ?? `Фоновая защита: ${st.task}`;
+  if (!st.firewall) text += ' · ⚠ Брандмауэр Windows выключен: без туннеля приложения закрываются, но их сетевая блокировка не действует. Включите брандмауэр.';
+  $('guardState').textContent = text;
+}
+
 function renderApps(apps) {
+  refreshGuard(apps);
   const ul = $('apps'); ul.innerHTML = '';
   if (!apps.length) {
     const li = document.createElement('li'); li.className = 'empty';

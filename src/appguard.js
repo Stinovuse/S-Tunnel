@@ -1,39 +1,43 @@
 'use strict';
-// «Только через S Tunnel»: выбранные приложения не работают без туннеля.
-// Элемент списка — либо целое приложение (папка установки: блокируются ВСЕ .exe внутри,
-// включая вспомогательные процессы, программы обновления и новые версии), либо один .exe.
-// Два уровня защиты:
-//  1. Брандмауэр: пока туннель НЕ включён, исходящий трафик этих .exe заблокирован
-//     (группа STunnelApps). Правила постоянные — действуют, даже если S Tunnel закрыт.
-//  2. Сторож процессов: запуск без туннеля -> процесс сразу закрывается + уведомление.
+// «Только через S Tunnel» — клиентская часть.
+// Сама защита живёт в фоновой задаче Windows «S Tunnel Guard» (scripts/guard.ps1, SYSTEM):
+// она работает и при закрытом S Tunnel. Здесь мы только:
+//  * передаём ей список приложений (C:\ProgramData\STunnel\apps.json — писать могут только админы),
+//  * устанавливаем/обновляем и запускаем задачу,
+//  * показываем уведомления о закрытых приложениях (по журналу сторожа),
+//  * считаем, сколько .exe в каждом приложении (для интерфейса).
 const { EventEmitter } = require('events');
-const { spawn } = require('child_process');
+const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const firewall = require('./firewall');
 const { scanDir, lc, isInside, pkgPathRegex } = require('./appscan');
 
-const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
 const RESCAN_MS = 10 * 60 * 1000;
+const STATE_DIR = path.join(process.env.ProgramData || 'C:\\ProgramData', 'STunnel');
+const APPS_FILE = path.join(STATE_DIR, 'apps.json');
+const LOG_FILE = path.join(STATE_DIR, 'guard-events.log');
+const GUARD_COPY = path.join(STATE_DIR, 'guard.ps1');
+const TASK = 'S Tunnel Guard';
+const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
 class AppGuard extends EventEmitter {
   /**
    * @param {object} o
-   * @param {import('./tunnel').Tunnel} o.tunnel
    * @param {() => Array<{type:'dir'|'exe'|'pkg', path:string, name:string}>} o.getApps
    *   type 'pkg': path = имя семейства пакета MSIX (например Claude_pzs8sxrjxfjjc)
-   * @param {(app:{name:string}) => void} o.onBlocked
+   * @param {(app:{name:string,path:string}) => void} o.onBlocked
+   * @param {string} o.guardScript  путь к scripts/guard.ps1 в установленном приложении
+   * @param {(line:string) => void} o.log
    */
-  constructor({ tunnel, getApps, onBlocked }) {
+  constructor({ getApps, onBlocked, guardScript, log }) {
     super();
-    this.tunnel = tunnel;
     this.getApps = getApps;
     this.onBlocked = onBlocked;
-    this.watcher = null;
-    this.watchKey = '';
-    this.cache = null; // { key, at, exes, dirs, counts }
-    this.syncing = Promise.resolve();
-    tunnel.on('state', (st) => { this.sync(st.state).catch((e) => tunnel.log(`Защита приложений: ${e.message}`)); });
-    setInterval(() => { this.cache = null; this.sync().catch(() => {}); }, RESCAN_MS);
+    this.guardScript = guardScript;
+    this.log = log;
+    this.cache = null;
+    this.logPos = null;
   }
 
   /** Развернуть список в конкретные .exe (с кэшем). */
@@ -86,114 +90,78 @@ class AppGuard extends EventEmitter {
     });
   }
 
-  /** Привести правила и процессы в соответствие с состоянием туннеля (по очереди). */
-  sync(state, { rescan = false } = {}) {
-    const run = this.syncing.then(() => this._sync(state ?? this.tunnel.state, rescan));
-    this.syncing = run.catch(() => {});
-    return run;
+  /** Установить/обновить фоновую задачу и передать ей текущий список. */
+  async start() {
+    if (process.platform !== 'win32') return;
+    await this.publish();
+    await this.installTask();
+    this.watchLog();
   }
 
-  async _sync(state, rescan) {
-    const t = await this.targets(rescan);
-    this.restartWatcher(t);
-    const block = state !== 'on';
-    await firewall.syncAppRules(t.exes, block);
-    if (block) await this.closeRunning(t);
+  /** Записать список приложений для сторожа (он перечитает файл сам в течение 2 секунд). */
+  async publish() {
+    if (process.platform !== 'win32') return;
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    const apps = this.getApps().map(({ type, path: p, name }) => ({ type, path: p, name }));
+    fs.writeFileSync(APPS_FILE, JSON.stringify({ apps }, null, 2));
+    this.cache = null;
+    await this.targets(true).catch(() => {});
   }
 
-  /** ПЕРЕД снятием kill switch: сначала блок приложений, потом обычный интернет. */
-  async beforeRestore() {
-    const t = await this.targets();
-    await firewall.syncAppRules(t.exes, true);
-    await this.closeRunning(t);
+  async installTask() {
+    const src = fs.readFileSync(this.guardScript);
+    const same = fs.existsSync(GUARD_COPY) &&
+      crypto.createHash('sha256').update(fs.readFileSync(GUARD_COPY)).digest('hex') === crypto.createHash('sha256').update(src).digest('hex');
+    if (!same) fs.writeFileSync(GUARD_COPY, src);
+    await firewall.runPs(`
+& icacls.exe ${q(STATE_DIR)} /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' 2>&1 | Out-Null
+$task = Get-ScheduledTask -TaskName ${q(TASK)} -ErrorAction SilentlyContinue
+if (-not $task -or ${same ? '$false' : '$true'}) {
+  if ($task) { Stop-ScheduledTask -TaskName ${q(TASK)} -ErrorAction SilentlyContinue }
+  $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + ${q(GUARD_COPY)} + '"')
+  $trigger = New-ScheduledTaskTrigger -AtStartup
+  $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+  Register-ScheduledTask -TaskName ${q(TASK)} -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+}
+if ((Get-ScheduledTask -TaskName ${q(TASK)}).State -ne 'Running') { Start-ScheduledTask -TaskName ${q(TASK)} }
+'ok'`, 120000);
+    this.log(same ? 'Фоновая защита приложений работает' : 'Фоновая защита приложений установлена/обновлена');
   }
 
-  async closeRunning(t) {
-    const closed = await firewall.stopAppProcesses(t.exes, t.dirs);
-    const seen = new Set();
-    for (const p of closed) {
-      const app = this.findApp(p);
-      if (app && !seen.has(app.path)) { seen.add(app.path); this.onBlocked(app); }
-    }
-  }
-
-  /** Постоянный PowerShell-процесс: сообщает о запуске .exe из списка или из папок приложений. */
-  restartWatcher(t) {
-    const names = [...new Set(t.exes.map((e) => path.win32.basename(e).toLowerCase()))];
-    const dirs = t.dirs.map(lc);
-    const pkgRes = t.pkgRes || [];
-    const key = JSON.stringify([names, dirs, pkgRes]);
-    if (key === this.watchKey && this.watcher) return;
-    this.stopWatcher();
-    this.watchKey = key;
-    if ((!names.length && !dirs.length && !pkgRes.length) || process.platform !== 'win32') return;
-
-    // Если есть папки — смотрим все запуски (новая версия приложения может иметь новое имя .exe)
-    const query = dirs.length
-      ? 'SELECT * FROM Win32_ProcessStartTrace'
-      : `SELECT * FROM Win32_ProcessStartTrace WHERE ${names.map((n) => `ProcessName='${n.replace(/'/g, "''")}'`).join(' OR ')}`;
-    const script = `
-$ErrorActionPreference = 'Stop'
-[Console]::OutputEncoding = [Text.Encoding]::UTF8
-$names = New-Object 'System.Collections.Generic.HashSet[string]'
-foreach ($n in @(${names.map(q).join(',')})) { [void]$names.Add($n) }
-$dirs = @(${dirs.map(q).join(',')})
-$pkgRes = @(${pkgRes.map(q).join(',')})
-Register-CimIndicationEvent -Query ${q(query)} -SourceIdentifier stunnel_start | Out-Null
-while ($true) {
-  $e = Wait-Event -SourceIdentifier stunnel_start
-  $ev = $e.SourceEventArgs.NewEvent
-  Remove-Event -EventIdentifier $e.EventIdentifier
-  $procId = $ev.ProcessID
-  $isName = $names.Contains(([string]$ev.ProcessName).ToLower())
-  if (-not $isName -and $dirs.Count -eq 0 -and $pkgRes.Count -eq 0) { continue }
-  $p = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction SilentlyContinue
-  if (-not $p -or -not $p.ExecutablePath) { continue }
-  $l = $p.ExecutablePath.ToLower()
-  $hit = $isName
-  if (-not $hit) { foreach ($d in $dirs) { if ($l.StartsWith($d + '\\')) { $hit = $true; break } } }
-  if (-not $hit) { foreach ($rx in $pkgRes) { if ($l -match $rx) { $hit = $true; break } } }
-  if ($hit) { [Console]::Out.WriteLine("$procId|$($p.ExecutablePath)"); [Console]::Out.Flush() }
-}`;
-    const enc = Buffer.from(script, 'utf16le').toString('base64');
-    const w = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', enc], { windowsHide: true });
-    this.watcher = w;
-    let buf = '';
-    w.stdout.setEncoding('utf8');
-    w.stdout.on('data', (d) => {
-      buf += d;
-      let i;
-      while ((i = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
-        const sep = line.indexOf('|');
-        if (sep > 0) this.onProcessStart(parseInt(line.slice(0, sep), 10), line.slice(sep + 1));
+  /** Уведомления: читаем новые строки журнала сторожа. */
+  watchLog() {
+    try { this.logPos = fs.existsSync(LOG_FILE) ? fs.statSync(LOG_FILE).size : 0; } catch { this.logPos = 0; }
+    const seen = new Map();
+    fs.watchFile(LOG_FILE, { interval: 1000 }, (cur) => {
+      if (cur.size < this.logPos) this.logPos = 0; // файл пересоздан
+      if (cur.size === this.logPos) return;
+      let chunk = '';
+      try {
+        const fd = fs.openSync(LOG_FILE, 'r');
+        const buf = Buffer.alloc(cur.size - this.logPos);
+        fs.readSync(fd, buf, 0, buf.length, this.logPos);
+        fs.closeSync(fd);
+        chunk = buf.toString('utf8');
+      } catch { return; }
+      this.logPos = cur.size;
+      for (const line of chunk.split(/\r?\n/)) {
+        const [, kind, text] = line.replace(/^\uFEFF/, '').split('\t');
+        if (kind !== 'closed' || !text) continue;
+        const app = this.findApp(text) || { name: path.win32.basename(text, '.exe'), path: text };
+        const now = Date.now();
+        if (now - (seen.get(app.path) || 0) < 5000) continue;
+        seen.set(app.path, now);
+        this.onBlocked(app);
       }
     });
-    w.stderr.on('data', () => {});
-    w.on('exit', () => {
-      if (this.watcher !== w) return;
-      this.watcher = null;
-      this.watchKey = '';
-      setTimeout(() => { if (!this.watcher && this.cache) this.restartWatcher(this.cache); }, 3000);
-    });
   }
 
-  stopWatcher() {
-    const w = this.watcher;
-    this.watcher = null;
-    if (w) { try { w.kill(); } catch {} }
-  }
-
-  onProcessStart(pid, exePath) {
-    const app = this.findApp(exePath);
-    if (!app) return;
-    // Новый .exe в папке приложения (обновилось) — добавим правило брандмауэра
-    const known = this.cache && this.cache.exes.some((e) => lc(e) === lc(exePath));
-    if (!known) this.sync(undefined, { rescan: true }).catch(() => {});
-    if (this.tunnel.state === 'on') return;
-    try { process.kill(pid); } catch {}
-    this.onBlocked(app);
+  /** Перед возвратом обычного интернета: закрыть выбранные приложения (сторож тоже это делает). */
+  async beforeRestore() {
+    const t = await this.targets();
+    await firewall.stopAppProcesses(t.exes, t.dirs);
   }
 }
 
-module.exports = { AppGuard };
+module.exports = { AppGuard, STATE_DIR, TASK };

@@ -95,29 +95,83 @@ $('test').onclick = async () => {
   await api.leakTest();
   $('test').disabled = false; $('test').textContent = 'Проверить';
 };
+function plural(n, a, b, c) { const m = n % 10, h = n % 100; return m === 1 && h !== 11 ? a : (m >= 2 && m <= 4 && (h < 12 || h > 14) ? b : c); }
+
 function renderApps(apps) {
   const ul = $('apps'); ul.innerHTML = '';
   if (!apps.length) {
     const li = document.createElement('li'); li.className = 'empty';
-    li.textContent = 'Список пуст — все программы работают как обычно';
+    li.textContent = 'Список пуст — все приложения работают как обычно';
     ul.append(li); return;
   }
   for (const a of apps) {
     const li = document.createElement('li'); li.className = 'app';
     const info = document.createElement('div');
     const n = document.createElement('b'); n.textContent = a.name;
-    const p = document.createElement('span'); p.textContent = a.path;
+    const p = document.createElement('span');
+    if (a.type === 'dir') {
+      const c = a.count == null ? '' : ` · ${a.count}${a.truncated ? '+' : ''} ${plural(a.count, 'программа', 'программы', 'программ')}`;
+      p.textContent = `Приложение целиком${c} — ${a.path}`;
+    } else p.textContent = `Только этот .exe — ${a.path}`;
+    p.title = a.path;
     info.append(n, p);
     const rm = document.createElement('button'); rm.className = 'small link'; rm.textContent = 'Убрать';
     rm.onclick = async () => renderApps((await api.appsRemove(a.path)).apps);
     li.append(info, rm); ul.append(li);
   }
 }
-$('appsAdd').onclick = async () => {
-  const r = await api.appsAdd();
+
+function afterAdd(r) {
   renderApps(r.apps);
   if (r.errors && r.errors.length) toast(r.errors.join('; '));
+}
+
+// ---- окно выбора приложений ----
+let installed = [];
+const picked = new Set();
+function renderPicker() {
+  const f = $('pkSearch').value.trim().toLowerCase();
+  const ul = $('pkList'); ul.innerHTML = '';
+  const list = installed.filter((a) => !f || a.name.toLowerCase().includes(f) || a.path.toLowerCase().includes(f));
+  if (!list.length) {
+    const li = document.createElement('li'); li.className = 'empty';
+    li.textContent = installed.length ? 'Ничего не найдено' : 'Приложения не найдены — выберите папку вручную';
+    ul.append(li);
+  }
+  for (const a of list) {
+    const li = document.createElement('li'); li.className = 'pick';
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = picked.has(a.path);
+    cb.onchange = () => { cb.checked ? picked.add(a.path) : picked.delete(a.path); $('pkAdd').disabled = !picked.size; };
+    const info = document.createElement('div');
+    const n = document.createElement('b'); n.textContent = a.name;
+    const p = document.createElement('span'); p.textContent = a.path; p.title = a.path;
+    info.append(n, p);
+    const label = document.createElement('label'); label.className = 'pickrow';
+    label.append(cb, info); li.append(label); ul.append(li);
+  }
+  $('pkAdd').textContent = picked.size ? `Добавить (${picked.size})` : 'Добавить';
+  $('pkAdd').disabled = !picked.size;
+}
+async function openPicker() {
+  picked.clear(); $('pkSearch').value = '';
+  $('picker').classList.remove('hidden');
+  $('pkList').innerHTML = '<li class="empty">Загружаю список приложений…</li>';
+  try { installed = await api.appsInstalled(); } catch { installed = []; }
+  renderPicker();
+  $('pkSearch').focus();
+}
+const closePicker = () => $('picker').classList.add('hidden');
+$('appsAdd').onclick = openPicker;
+$('pkClose').onclick = closePicker;
+$('pkSearch').oninput = renderPicker;
+$('pkAdd').onclick = async () => {
+  const entries = installed.filter((a) => picked.has(a.path));
+  $('pkAdd').disabled = true; $('pkAdd').textContent = 'Добавляю…';
+  afterAdd(await api.appsAddEntries(entries));
+  closePicker();
 };
+$('pkFolder').onclick = async () => { const r = await api.appsAddFolder(); afterAdd(r); if (!r.errors?.length) closePicker(); };
+$('pkExe').onclick = async () => { const r = await api.appsAddExe(); afterAdd(r); if (!r.errors?.length) closePicker(); };
 
 let upd = { state: 'idle' };
 function renderUpdate(u) {
@@ -155,7 +209,7 @@ api.init().then((d) => {
   renderState(d.status);
   d.log.forEach(addLog);
   renderUpdate(d.update);
-  renderApps(d.settings.guardedApps || []);
+  api.appsList().then(renderApps);
   if (d.killSwitchLeft) {
     const b = $('banner');
     b.textContent = 'Kill switch остался включён после прошлого сбоя — интернет заблокирован. Подключитесь или нажмите «Отключить».';

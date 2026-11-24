@@ -6,7 +6,8 @@ const { Tunnel } = require('./src/tunnel');
 const { PROTOCOLS } = require('./src/core-config');
 const firewall = require('./src/firewall');
 const { Updater } = require('./src/updater');
-const { AppGuard, validateAppPath } = require('./src/appguard');
+const { AppGuard } = require('./src/appguard');
+const { validateAppPath, validateAppDir, lc } = require('./src/appscan');
 
 if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
 
@@ -31,8 +32,11 @@ function loadSettings() {
   // миграция со старой версии, где был флажок tls
   if ('tls' in s) { if (!PROTOCOLS.includes(s.protocol) || s.protocol === 'http') s.protocol = s.tls ? 'https' : 'http'; delete s.tls; }
   if (!PROTOCOLS.includes(s.protocol)) s.protocol = 'http';
+  // элементы: {type:'dir'|'exe', path, name}; старые записи (без type) — это .exe
   s.guardedApps = (Array.isArray(s.guardedApps) ? s.guardedApps : [])
-    .filter((a) => a && typeof a.path === 'string' && !validateAppPath(a.path));
+    .filter((a) => a && typeof a.path === 'string')
+    .map((a) => ({ type: a.type === 'dir' ? 'dir' : 'exe', path: a.path, name: String(a.name || path.basename(a.path)) }))
+    .filter((a) => !(a.type === 'dir' ? validateAppDir(a.path) : validateAppPath(a.path)));
   return s;
 }
 function saveSettings(s) {
@@ -191,32 +195,71 @@ ipcMain.handle('save-settings', (_e, inc) => {
   return publicSettings(s);
 });
 
-ipcMain.handle('apps-add', async () => {
-  const r = await dialog.showOpenDialog(win, {
-    title: 'Программа, которая будет работать только через S Tunnel',
-    filters: [{ name: 'Программы', extensions: ['exe'] }],
-    properties: ['openFile', 'multiSelections'],
-  });
-  if (r.canceled) return { apps: loadSettings().guardedApps };
+function appsView() {
+  const s = loadSettings();
+  let counts = {};
+  try { counts = guard.counts(); } catch {}
+  return s.guardedApps.map((a) => ({ ...a, count: counts[a.path]?.n ?? null, truncated: !!counts[a.path]?.truncated }));
+}
+
+async function addApps(entries) {
   const s = loadSettings();
   const errors = [];
-  for (const p of r.filePaths) {
-    const err = validateAppPath(p);
-    if (err) { errors.push(`${path.basename(p)}: ${err}`); continue; }
-    if (s.guardedApps.some((a) => a.path.toLowerCase() === p.toLowerCase())) continue;
-    s.guardedApps.push({ path: p, name: path.basename(p, path.extname(p)) });
+  for (const e of entries) {
+    const err = e.type === 'dir' ? validateAppDir(e.path) : validateAppPath(e.path);
+    if (err) { errors.push(`${e.name}: ${err}`); continue; }
+    if (s.guardedApps.some((a) => lc(a.path) === lc(e.path))) continue;
+    s.guardedApps.push({ type: e.type, path: e.path, name: e.name });
   }
   saveSettings(s);
-  await guard.sync();
-  return { apps: s.guardedApps, errors };
+  await guard.sync(undefined, { rescan: true });
+  return { apps: appsView(), errors };
+}
+
+ipcMain.handle('apps-list', () => appsView());
+
+// Установленные приложения из меню «Пуск»: приложение = папка, где лежит его программа
+ipcMain.handle('apps-installed', async () => {
+  const raw = await firewall.listStartMenuApps().catch(() => []);
+  const byDir = new Map();
+  for (const r of raw) {
+    if (!r || !r.exe || /uninstall|удал|readme|help|справк|documentation|website|сайт/i.test(r.name)) continue;
+    if (validateAppPath(r.exe)) continue;
+    const dir = path.dirname(r.exe);
+    const entry = validateAppDir(dir)
+      ? { type: 'exe', path: r.exe, name: r.name }
+      : { type: 'dir', path: dir, name: r.name };
+    const k = lc(entry.path);
+    if (!byDir.has(k) || r.name.length < byDir.get(k).name.length) byDir.set(k, entry);
+  }
+  return [...byDir.values()].sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+});
+
+ipcMain.handle('apps-add-entries', (_e, entries) => addApps(
+  (Array.isArray(entries) ? entries : []).filter((x) => x && typeof x.path === 'string')
+    .map((x) => ({ type: x.type === 'dir' ? 'dir' : 'exe', path: x.path, name: String(x.name || path.basename(x.path)) }))));
+
+ipcMain.handle('apps-add-folder', async () => {
+  const r = await dialog.showOpenDialog(win, { title: 'Папка, в которой установлено приложение', properties: ['openDirectory'] });
+  if (r.canceled || !r.filePaths[0]) return { apps: appsView() };
+  const d = r.filePaths[0];
+  return addApps([{ type: 'dir', path: d, name: path.basename(d) }]);
+});
+
+ipcMain.handle('apps-add-exe', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    title: 'Отдельная программа (.exe)', filters: [{ name: 'Программы', extensions: ['exe'] }], properties: ['openFile', 'multiSelections'],
+  });
+  if (r.canceled) return { apps: appsView() };
+  return addApps(r.filePaths.map((p) => ({ type: 'exe', path: p, name: path.basename(p, path.extname(p)) })));
 });
 
 ipcMain.handle('apps-remove', async (_e, p) => {
   const s = loadSettings();
-  s.guardedApps = s.guardedApps.filter((a) => a.path.toLowerCase() !== String(p).toLowerCase());
+  s.guardedApps = s.guardedApps.filter((a) => lc(a.path) !== lc(p));
   saveSettings(s);
-  await guard.sync();
-  return { apps: s.guardedApps };
+  await guard.sync(undefined, { rescan: true });
+  return { apps: appsView() };
 });
 
 ipcMain.handle('connect', () => doConnect());

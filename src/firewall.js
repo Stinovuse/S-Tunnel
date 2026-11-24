@@ -229,22 +229,64 @@ ConvertTo-Json -Compress -InputObject @($out)`;
 // ---- «Только через S Tunnel» ----
 const APPS_GROUP = 'STunnelApps';
 
-/** Ставит Block-правила на выбранные программы (или снимает все при пустом списке). */
-async function setAppBlocks(paths) {
-  const rules = paths.map((p) =>
-    `New-NetFirewallRule -DisplayName ${q('S Tunnel: без туннеля запрещено — ' + p.split('\\').pop())} -Group '${APPS_GROUP}' -Direction Outbound -Action Block -Program ${q(p)} | Out-Null`).join('\n');
-  return runPs(`Remove-NetFirewallRule -Group '${APPS_GROUP}' -ErrorAction SilentlyContinue
-${rules}
-'ok'`, 60000);
+/**
+ * Приводит Block-правила группы STunnelApps к списку exes (добавляет недостающие,
+ * удаляет лишние) и включает/выключает всю группу одной командой.
+ * @param {string[]} exes
+ * @param {boolean} enabled  true = блокировать (туннель не включён)
+ */
+async function syncAppRules(exes, enabled) {
+  const want = exes.length ? exes.map((p) => q(p)).join(',') : '';
+  return runPs(`$want = @(${want})
+$wantL = @{}; foreach ($w in $want) { $wantL[$w.ToLower()] = $w }
+$have = @{}
+foreach ($f in @(Get-NetFirewallRule -Group '${APPS_GROUP}' -ErrorAction SilentlyContinue | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue)) {
+  $prog = [string]$f.Program
+  if (-not $prog -or -not $wantL.ContainsKey($prog.ToLower()) -or $have.ContainsKey($prog.ToLower())) {
+    Remove-NetFirewallRule -Name $f.InstanceID -ErrorAction SilentlyContinue
+  } else { $have[$prog.ToLower()] = $true }
+}
+$en = ${enabled ? "'True'" : "'False'"}
+foreach ($k in $wantL.Keys) {
+  if (-not $have.ContainsKey($k)) {
+    $p = $wantL[$k]
+    New-NetFirewallRule -DisplayName ('S Tunnel: без туннеля запрещено — ' + (Split-Path $p -Leaf)) -Group '${APPS_GROUP}' -Direction Outbound -Action Block -Program $p -Enabled $en | Out-Null
+  }
+}
+if ($want.Count) {
+  if ($en -eq 'True') { Enable-NetFirewallRule -Group '${APPS_GROUP}' -ErrorAction SilentlyContinue }
+  else { Disable-NetFirewallRule -Group '${APPS_GROUP}' -ErrorAction SilentlyContinue }
+}
+'ok'`, 300000);
 }
 
-/** Закрывает запущенные процессы с этими путями; возвращает пути закрытых. */
-async function stopProcessesByPath(paths) {
-  if (!paths.length) return [];
-  const r = await runPs(`$want = @(${paths.map((p) => q(p.toLowerCase())).join(',')})
-$hit = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -and ($want -contains $_.ExecutablePath.ToLower()) })
+/** Закрывает процессы из списка exes и из папок dirs; возвращает пути закрытых. */
+async function stopAppProcesses(exes, dirs) {
+  if (!exes.length && !dirs.length) return [];
+  const list = (a) => (a.length ? a.map((x) => q(x.toLowerCase())).join(',') : '');
+  const r = await runPs(`$exes = @(${list(exes)}); $dirs = @(${list(dirs)})
+$hit = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+  $p = $_.ExecutablePath; if (-not $p) { return $false }; $l = $p.ToLower()
+  if ($exes -contains $l) { return $true }
+  foreach ($d in $dirs) { if ($l.StartsWith($d + '\\')) { return $true } }
+  $false })
 foreach ($p in $hit) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
 ConvertTo-Json -Compress -InputObject @($hit | ForEach-Object { [string]$_.ExecutablePath } | Select-Object -Unique)`, 60000);
+  try { const j = JSON.parse(r || '[]'); return Array.isArray(j) ? j : [j]; } catch { return []; }
+}
+
+/** Установленные приложения: ярлыки меню «Пуск» -> [{name, exe}] */
+async function listStartMenuApps() {
+  const r = await runPs(`$dirs = @([Environment]::GetFolderPath('CommonStartMenu'), [Environment]::GetFolderPath('StartMenu'))
+$sh = New-Object -ComObject WScript.Shell
+$out = foreach ($l in @(Get-ChildItem -Path $dirs -Recurse -Filter *.lnk -ErrorAction SilentlyContinue)) {
+  $t = ''
+  try { $t = $sh.CreateShortcut($l.FullName).TargetPath } catch {}
+  if ($t -and $t.ToLower().EndsWith('.exe') -and (Test-Path -LiteralPath $t)) {
+    [pscustomobject]@{ name = $l.BaseName; exe = $t }
+  }
+}
+ConvertTo-Json -Compress -InputObject @($out)`, 120000);
   try { const j = JSON.parse(r || '[]'); return Array.isArray(j) ? j : [j]; } catch { return []; }
 }
 
@@ -255,4 +297,4 @@ async function isAdmin() {
   } catch { return false; }
 }
 
-module.exports = { setAppBlocks, stopProcessesByPath, APPS_GROUP, enable, disable, resetDirectConnections, listDirectConnections, isActive, isAdmin, cleanupTunAddresses, cleanClixml, runPs, GROUP };
+module.exports = { syncAppRules, stopAppProcesses, listStartMenuApps, APPS_GROUP, enable, disable, resetDirectConnections, listDirectConnections, isActive, isAdmin, cleanupTunAddresses, cleanClixml, runPs, GROUP };

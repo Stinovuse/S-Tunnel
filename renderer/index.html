@@ -54,9 +54,9 @@
   <section>
     <div class="row between">
       <h2>Только через S Tunnel</h2>
-      <button id="appsAdd" class="small">+ Добавить программу</button>
+      <button id="appsAdd" class="small">+ Добавить приложение</button>
     </div>
-    <div class="muted">Пока туннель выключен, эти программы закрываются при запуске, а их выход в интернет заблокирован брандмауэром, даже если S Tunnel закрыт.</div>
+    <div class="muted">Пока туннель выключен, эти приложения закрываются при запуске, а их выход в интернет заблокирован брандмауэром, даже если S Tunnel закрыт. Блокируется всё приложение: основная программа, вспомогательные процессы и обновления.</div>
     <ul id="apps"></ul>
   </section>
 
@@ -75,6 +75,21 @@
     <div class="row between"><h2>Журнал</h2><button id="emergency" class="small link">Аварийное восстановление</button></div>
     <pre id="log"></pre>
   </section>
+
+  <div id="picker" class="modal hidden">
+    <div class="sheet">
+      <div class="row between"><h2>Выберите приложения</h2><button id="pkClose" class="small link">Закрыть</button></div>
+      <input id="pkSearch" placeholder="Поиск: Telegram, Chrome, Discord…">
+      <ul id="pkList"><li class="empty">Загружаю список приложений…</li></ul>
+      <div class="row between pkfoot">
+        <div class="row">
+          <button id="pkFolder" class="small">Папка вручную…</button>
+          <button id="pkExe" class="small">Отдельный .exe…</button>
+        </div>
+        <button id="pkAdd" class="primary small" disabled>Добавить</button>
+      </div>
+    </div>
+  </div>
 
   <div id="toast" class="toast hidden"></div>
   <script src="app.js"></script>

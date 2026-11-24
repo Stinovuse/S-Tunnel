@@ -5,7 +5,7 @@ const assert = require('assert');
 const fs = require('fs');
 const { buildConfig } = require('../src/core-config');
 
-const base = { proxyIp: '203.0.113.10', port: 3128, tls: true, sni: 'proxy.example.com',
+const base = { proxyIp: '203.0.113.10', port: 3128, protocol: 'https', sni: 'proxy.example.com',
   username: 'u', password: 'p', allowLan: false, dnsServer: '1.1.1.1' };
 const c = buildConfig(base);
 
@@ -19,10 +19,27 @@ assert.ok(c.route.rules.some((r) => r.network === 'udp' && r.action === 'reject'
 assert.strictEqual(c.dns.servers[0].detour, 'proxy', 'DNS идёт через прокси');
 assert.ok(!c.inbounds[0].route_exclude_address, 'без LAN ничего не исключается');
 
-const lan = buildConfig({ ...base, allowLan: true, tls: false });
+const lan = buildConfig({ ...base, allowLan: true, protocol: 'http' });
 assert.ok(lan.inbounds[0].route_exclude_address.includes('192.168.0.0/16'));
 assert.ok(!lan.outbounds[0].tls);
 
+// SOCKS5: UDP НЕ отклоняется, выход типа socks v5, DNS всё так же через прокси
+const sk = buildConfig({ ...base, protocol: 'socks5', port: 1080 });
+assert.strictEqual(sk.outbounds[0].type, 'socks');
+assert.strictEqual(sk.outbounds[0].version, '5');
+assert.ok(!sk.outbounds[0].tls);
+assert.ok(!sk.route.rules.some((r) => r.network === 'udp'), 'UDP через SOCKS5 разрешён');
+assert.strictEqual(sk.route.final, 'proxy');
+assert.strictEqual(sk.outbounds.length, 1, 'мимо прокси выхода нет');
+assert.strictEqual(sk.dns.servers[0].detour, 'proxy');
+
+// неизвестный протокол -> безопасный http без UDP
+const bad = buildConfig({ ...base, protocol: 'weird' });
+assert.ok(bad.route.rules.some((r) => r.network === 'udp' && r.action === 'reject'));
+
 const i = process.argv.indexOf('--write');
-if (i > 0) fs.writeFileSync(process.argv[i + 1], JSON.stringify(c, null, 2));
+if (i > 0) {
+  fs.writeFileSync(process.argv[i + 1], JSON.stringify(c, null, 2));
+  fs.writeFileSync(process.argv[i + 1].replace(/\.json$/, '-socks.json'), JSON.stringify(sk, null, 2));
+}
 console.log('config tests: OK');

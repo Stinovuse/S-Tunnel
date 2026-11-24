@@ -24,7 +24,8 @@ function fillSettings(s) {
   $('password').value = '';
   hasPassword = s.hasPassword;
   $('password').placeholder = s.hasPassword ? '•••••• (сохранён)' : '';
-  $('tls').checked = !!s.tls;
+  $('protocol').value = s.protocol || 'http';
+  protoHint();
   $('allowLan').checked = !!s.allowLan;
   $('autoConnect').checked = !!s.autoConnect;
   $('dnsServer').value = s.dnsServer || '1.1.1.1';
@@ -61,7 +62,7 @@ async function save() {
   try {
     const s = await api.save({
       host: $('host').value, port: $('port').value, username: $('username').value,
-      password: $('password').value, tls: $('tls').checked, allowLan: $('allowLan').checked,
+      password: $('password').value, protocol: $('protocol').value, allowLan: $('allowLan').checked,
       autoConnect: $('autoConnect').checked, dnsServer: $('dnsServer').value.trim(),
     });
     fillSettings(s);
@@ -69,6 +70,14 @@ async function save() {
     return true;
   } catch (e) { toast(String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); return false; }
 }
+
+const HINTS = {
+  socks5: 'UDP пойдёт через прокси, если сервер это поддерживает (проверка покажет). Канал до прокси не шифруется: провайдер видит, что вы подключены к прокси, и имена сайтов.',
+  https: 'Канал до прокси зашифрован. UDP заблокирован: звонки в части мессенджеров и некоторые игры не будут работать.',
+  http: 'Канал до прокси не шифруется. UDP заблокирован.',
+};
+function protoHint() { $('protoHint').textContent = HINTS[$('protocol').value] || ''; }
+$('protocol').onchange = protoHint;
 
 $('save').onclick = save;
 $('toggle').onclick = async () => {

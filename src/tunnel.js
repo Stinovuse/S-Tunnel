@@ -7,7 +7,7 @@ const fs = require('fs');
 const dns = require('dns');
 const net = require('net');
 
-const { buildConfig } = require('./core-config');
+const { buildConfig, supportsUdp } = require('./core-config');
 const firewall = require('./firewall');
 const leak = require('./leakcheck');
 
@@ -85,10 +85,10 @@ class Tunnel extends EventEmitter {
       }
 
       this.log('Включаю kill switch (Windows Firewall)…');
-      await firewall.enable({ corePath: this.corePath, proxyIp, proxyPort: settings.port, allowLan: settings.allowLan });
+      await firewall.enable({ corePath: this.corePath, proxyIp, proxyPort: settings.port, allowLan: settings.allowLan, udp: supportsUdp(settings.protocol) });
 
       const cfg = buildConfig({
-        proxyIp, port: settings.port, tls: settings.tls, sni: net.isIP(settings.host) ? '' : settings.host,
+        proxyIp, port: settings.port, protocol: settings.protocol, sni: net.isIP(settings.host) ? '' : settings.host,
         username: settings.username, password: settings.password,
         allowLan: settings.allowLan, dnsServer: settings.dnsServer,
       });
@@ -166,7 +166,7 @@ class Tunnel extends EventEmitter {
 
   async runLeakTest() {
     this.log('Проверяю утечки…');
-    this.leakResults = await leak.runAll(this.real);
+    this.leakResults = await leak.runAll(this.real, { udpExpected: supportsUdp(this.settings?.protocol) });
     for (const r of this.leakResults) this.log(`${r.ok ? '✔' : '✖'} ${r.name}: ${r.detail}`);
     this.emit('state', this.snapshot());
     return this.leakResults;

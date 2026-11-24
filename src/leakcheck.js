@@ -59,10 +59,57 @@ function tryDirectUdpDns(localAddress) {
 }
 
 /**
+ * STUN Binding Request (RFC 5389): сервер отвечает, с какого IP:порта пришёл UDP-пакет.
+ * Через SOCKS5 это должен быть IP прокси; через HTTP(S) запрос не должен пройти вовсе.
+ */
+function stunMappedIp(host, port, ms = 4000) {
+  return new Promise((resolve, reject) => {
+    const tid = require('crypto').randomBytes(12);
+    const req = Buffer.concat([Buffer.from([0x00, 0x01, 0x00, 0x00, 0x21, 0x12, 0xa4, 0x42]), tid]);
+    const sock = dgram.createSocket('udp4');
+    let finished = false;
+    const done = (err, ip) => {
+      if (finished) return; finished = true; clearTimeout(t);
+      try { sock.close(); } catch {}
+      err ? reject(err) : resolve(ip);
+    };
+    const t = setTimeout(() => done(new Error('нет ответа')), ms);
+    sock.on('error', (e) => done(e));
+    sock.on('message', (msg) => {
+      if (msg.length < 20 || msg.readUInt16BE(0) !== 0x0101 || !msg.subarray(8, 20).equals(tid)) return;
+      let off = 20;
+      while (off + 4 <= msg.length) {
+        const type = msg.readUInt16BE(off), len = msg.readUInt16BE(off + 2), v = off + 4;
+        if ((type === 0x0020 || type === 0x0001) && msg[v + 1] === 0x01 && len >= 8) {
+          const b = msg.subarray(v + 4, v + 8);
+          const ip = type === 0x0020
+            ? [b[0] ^ 0x21, b[1] ^ 0x12, b[2] ^ 0xa4, b[3] ^ 0x42].join('.')
+            : [...b].join('.');
+          return done(null, ip);
+        }
+        off = v + len + ((4 - (len % 4)) % 4);
+      }
+      done(new Error('ответ STUN без адреса'));
+    });
+    sock.send(req, port, host, (e) => { if (e) done(e); });
+  });
+}
+
+async function udpPublicIp() {
+  const servers = [['stun.cloudflare.com', 3478], ['stun.l.google.com', 19302]];
+  let lastErr;
+  for (const [h, p] of servers) {
+    try { return await stunMappedIp(h, p); } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
+}
+
+/**
  * @param {{realIPv4?:string, realIPv6?:string}} real  адреса, измеренные ДО подключения
+ * @param {{udpExpected?:boolean}} [opts]  true для SOCKS5 (UDP должен идти через прокси)
  * @returns {Promise<Array<{name:string, ok:boolean, detail:string}>>}
  */
-async function runAll(real = {}) {
+async function runAll(real = {}, opts = {}) {
   const results = [];
 
   // 1. Внешний IPv4
@@ -92,7 +139,20 @@ async function runAll(real = {}) {
     results.push({ name: 'DNS', ok: false, detail: `DNS не работает (${e.code || e.message})` });
   }
 
-  // 4. Kill switch: прямой выход мимо туннеля с каждого физического адреса
+  // 4. UDP (STUN): видимый снаружи IP для UDP-трафика
+  try {
+    const uip = await udpPublicIp();
+    const ok = !real.realIPv4 || uip !== real.realIPv4;
+    results.push({ name: 'UDP (звонки, игры, QUIC)', ok,
+      detail: ok ? `работает через прокси, виден ${uip}` : `УТЕЧКА: UDP показывает реальный IP ${uip}` });
+  } catch {
+    results.push({ name: 'UDP (звонки, игры, QUIC)', ok: true,
+      detail: opts.udpExpected
+        ? 'не работает: сервер SOCKS5 не пропускает UDP (утечки нет, но звонки/игры работать не будут)'
+        : 'заблокирован — HTTP(S)-прокси не передаёт UDP (утечки нет)' });
+  }
+
+  // 5. Kill switch: прямой выход мимо туннеля с каждого физического адреса
   const phys = physicalAddresses();
   for (const a of phys) {
     const tcpLeak = await tryDirectTcp(a.address, a.family);
@@ -115,4 +175,4 @@ async function runAll(real = {}) {
   return results;
 }
 
-module.exports = { runAll, publicIPv4, publicIPv6, physicalAddresses };
+module.exports = { runAll, udpPublicIp, stunMappedIp, publicIPv4, publicIPv6, physicalAddresses };

@@ -3,6 +3,7 @@ const { app, BrowserWindow, Tray, Menu, ipcMain, safeStorage, nativeImage, dialo
 const path = require('path');
 const fs = require('fs');
 const { Tunnel } = require('./src/tunnel');
+const { PROTOCOLS } = require('./src/core-config');
 const firewall = require('./src/firewall');
 
 if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
@@ -17,13 +18,18 @@ const emergencyScript = app.isPackaged
   : path.join(__dirname, 'scripts', 'emergency-restore.cmd');
 
 const DEFAULTS = {
-  host: '', port: 8080, tls: false, username: '', passwordEnc: '',
+  host: '', port: 8080, protocol: 'http', username: '', passwordEnc: '',
   allowLan: false, dnsServer: '1.1.1.1', autoConnect: false, cachedIp: '',
 };
 
 function loadSettings() {
-  try { return { ...DEFAULTS, ...JSON.parse(fs.readFileSync(settingsPath, 'utf8')) }; }
+  let s;
+  try { s = { ...DEFAULTS, ...JSON.parse(fs.readFileSync(settingsPath, 'utf8')) }; }
   catch { return { ...DEFAULTS }; }
+  // миграция со старой версии, где был флажок tls
+  if ('tls' in s) { if (!PROTOCOLS.includes(s.protocol) || s.protocol === 'http') s.protocol = s.tls ? 'https' : 'http'; delete s.tls; }
+  if (!PROTOCOLS.includes(s.protocol)) s.protocol = 'http';
+  return s;
 }
 function saveSettings(s) {
   fs.mkdirSync(userDir, { recursive: true });
@@ -135,7 +141,7 @@ ipcMain.handle('save-settings', (_e, inc) => {
   if (!(port > 0 && port < 65536)) throw new Error('Некорректный порт');
   if (s.host !== inc.host.trim()) s.cachedIp = '';
   Object.assign(s, {
-    host: inc.host.trim(), port, tls: !!inc.tls, username: (inc.username || '').trim(),
+    host: inc.host.trim(), port, protocol: PROTOCOLS.includes(inc.protocol) ? inc.protocol : 'http', username: (inc.username || '').trim(),
     allowLan: !!inc.allowLan, autoConnect: !!inc.autoConnect,
     dnsServer: /^[0-9.]+$/.test(inc.dnsServer || '') ? inc.dnsServer : '1.1.1.1',
   });

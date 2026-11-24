@@ -1,8 +1,10 @@
 'use strict';
 // Генерация конфига sing-box (проверено по схеме 1.13.x).
-// Принцип: ВЕСЬ трафик -> TUN -> HTTP(S)-прокси. UDP через HTTP-прокси невозможен
-// (CONNECT = только TCP), поэтому UDP отклоняется, а DNS перехватывается и уходит
-// как DNS-over-HTTPS (TCP 443) ЧЕРЕЗ прокси.
+// Принцип: ВЕСЬ трафик -> TUN -> прокси (HTTP, HTTPS или SOCKS5).
+// HTTP/HTTPS: UDP невозможен (CONNECT = только TCP) -> UDP отклоняется.
+// SOCKS5: UDP идёт через прокси (UDP ASSOCIATE). Если провайдер его не поддерживает,
+// UDP просто не работает — мимо прокси он всё равно не уйдёт.
+// DNS всегда перехватывается и уходит как DNS-over-HTTPS ЧЕРЕЗ прокси.
 
 const TUN_NAME = 'STunnel';
 const TUN_V4 = '172.19.0.1';
@@ -22,27 +24,37 @@ const PRIVATE_RANGES = [
  * @param {string} o.proxyIp      IP прокси (уже разрешённый, чтобы ядру не нужен был DNS)
  * @param {number} o.port
  * @param {string} [o.sni]        имя хоста для TLS (HTTPS-прокси)
- * @param {boolean} o.tls
+ * @param {'http'|'https'|'socks5'} o.protocol
  * @param {string} [o.username]
  * @param {string} [o.password]
  * @param {boolean} o.allowLan    пускать локальную сеть (принтеры, NAS) мимо туннеля
  * @param {string} o.dnsServer    IP DoH-сервера, например 1.1.1.1
  * @param {string} [o.logLevel]
  */
+const PROTOCOLS = ['http', 'https', 'socks5'];
+const supportsUdp = (protocol) => protocol === 'socks5';
+
 function buildConfig(o) {
-  const proxy = {
-    type: 'http',
-    tag: 'proxy',
-    server: o.proxyIp,
-    server_port: Number(o.port),
-  };
+  const protocol = PROTOCOLS.includes(o.protocol) ? o.protocol : 'http';
+  const proxy = protocol === 'socks5'
+    ? { type: 'socks', tag: 'proxy', server: o.proxyIp, server_port: Number(o.port), version: '5' }
+    : { type: 'http', tag: 'proxy', server: o.proxyIp, server_port: Number(o.port) };
   if (o.username) {
     proxy.username = o.username;
     proxy.password = o.password || '';
   }
-  if (o.tls) {
+  if (protocol === 'https') {
     proxy.tls = { enabled: true, server_name: o.sni || o.proxyIp };
   }
+
+  const rules = [
+    { action: 'sniff' },
+    { protocol: 'dns', action: 'hijack-dns' },
+    { port: 53, action: 'hijack-dns' },
+  ];
+  // Для HTTP(S) UDP отклоняем (QUIC, WebRTC/STUN, игры) — пусть программы падают на TCP
+  if (!supportsUdp(protocol)) rules.push({ network: 'udp', action: 'reject' });
+  rules.push({ ip_is_private: true, action: 'reject' });
 
   const tun = {
     type: 'tun',
@@ -69,16 +81,10 @@ function buildConfig(o) {
     outbounds: [proxy],
     route: {
       auto_detect_interface: true, // сокеты самого ядра привязаны к физ. адаптеру — без петли
-      rules: [
-        { action: 'sniff' },
-        { protocol: 'dns', action: 'hijack-dns' },
-        { port: 53, action: 'hijack-dns' },
-        { network: 'udp', action: 'reject' }, // QUIC, WebRTC/STUN, игры — не утекут
-        { ip_is_private: true, action: 'reject' },
-      ],
+      rules,
       final: 'proxy',
     },
   };
 }
 
-module.exports = { buildConfig, TUN_NAME, TUN_V4, TUN_V6, PRIVATE_RANGES };
+module.exports = { buildConfig, supportsUdp, PROTOCOLS, TUN_NAME, TUN_V4, TUN_V6, PRIVATE_RANGES };

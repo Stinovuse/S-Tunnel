@@ -53,8 +53,14 @@ async function isActive() {
  * @param {string} o.proxyIp
  * @param {number} o.proxyPort
  * @param {boolean} o.allowLan
+ * @param {boolean} o.udp       SOCKS5: разрешить ядру UDP к серверу прокси
  */
 async function enable(o) {
+  // UDP-ретранслятор SOCKS5 выдаёт порт динамически, поэтому порт не ограничиваем,
+  // но адрес — строго IP прокси и только для sing-box.exe.
+  const udpRule = o.udp
+    ? `New-NetFirewallRule -DisplayName 'STunnel: ядро -> прокси (UDP)' -Group '${GROUP}' -Direction Outbound -Action Allow -Program ${q(o.corePath)} -Protocol UDP -RemoteAddress ${q(o.proxyIp)} | Out-Null`
+    : '';
   const lanRule = o.allowLan
     ? `New-NetFirewallRule -DisplayName 'STunnel: локальная сеть' -Group '${GROUP}' -Direction Outbound -Action Allow -RemoteAddress ${qList(LAN)} | Out-Null`
     : '';
@@ -78,6 +84,7 @@ New-NetFirewallRule -DisplayName 'STunnel: ядро -> прокси' -Group '${G
 New-NetFirewallRule -DisplayName 'STunnel: трафик внутри туннеля' -Group '${GROUP}' -Direction Outbound -Action Allow -LocalAddress ${q(TUN_V4)},${q(TUN_V6)} | Out-Null
 New-NetFirewallRule -DisplayName 'STunnel: DHCP' -Group '${GROUP}' -Direction Outbound -Action Allow -Protocol UDP -LocalPort 68 -RemotePort 67 | Out-Null
 New-NetFirewallRule -DisplayName 'STunnel: DHCPv6' -Group '${GROUP}' -Direction Outbound -Action Allow -Protocol UDP -LocalPort 546 -RemotePort 547 | Out-Null
+${udpRule}
 ${lanRule}
 'ok'`;
   return runPs(script);

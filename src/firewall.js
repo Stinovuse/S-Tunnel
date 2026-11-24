@@ -20,24 +20,51 @@ const LAN = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16',
 const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
 const qList = (arr) => arr.map(q).join(',');
 
+// Все операции с брандмауэром выполняются строго по очереди
+let queue = Promise.resolve();
 function runPs(script, timeoutMs = 120000) {
+  const run = queue.then(() => runPsNow(script, timeoutMs));
+  queue = run.catch(() => {});
+  return run;
+}
+
+function runPsNow(script, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const full = `$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue';\n${script}`;
+    // Ошибку отдаём обычной строкой в UTF-8, а не в формате CLIXML
+    const full = `[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'
+try {
+${script}
+} catch {
+  [Console]::Out.WriteLine('STUNNEL_ERR:' + $_.Exception.Message)
+  exit 1
+}`;
     const enc = Buffer.from(full, 'utf16le').toString('base64');
     const p = spawn('powershell.exe',
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', enc],
       { windowsHide: true });
     let out = '', err = '';
+    p.stdout.setEncoding('utf8');
+    p.stderr.setEncoding('utf8');
     p.stdout.on('data', (d) => { out += d; });
     p.stderr.on('data', (d) => { err += d; });
     const t = setTimeout(() => { p.kill(); reject(new Error('PowerShell: таймаут')); }, timeoutMs);
     p.on('error', (e) => { clearTimeout(t); reject(e); });
     p.on('close', (code) => {
       clearTimeout(t);
-      if (code === 0) resolve(out.trim());
-      else reject(new Error((err || out || `PowerShell код ${code}`).trim()));
+      const m = out.match(/STUNNEL_ERR:(.*)/);
+      if (code === 0 && !m) { resolve(out.trim()); return; }
+      reject(new Error(m ? m[1].trim() : cleanClixml(err || out) || `PowerShell код ${code}`));
     });
   });
+}
+
+/** Запасной вариант: достаём текст ошибок из CLIXML. */
+function cleanClixml(text) {
+  if (!/CLIXML/.test(text)) return text.trim();
+  const parts = [...text.matchAll(/<S S="Error">([\s\S]*?)<\/S>/g)].map((x) => x[1]);
+  return parts.join('').replace(/_x000D__x000A_/g, '\n').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&').split('\n')[0].trim();
 }
 
 const STATE_PS = `$dir = Join-Path $env:ProgramData 'STunnel'; $state = Join-Path $dir 'killswitch.json'`;
@@ -102,7 +129,7 @@ if (Test-Path $state) {
     }
   }
   $names = @(@($s.rules) | Where-Object { $_ }); if ($names.Count) { Enable-NetFirewallRule -Name $names -ErrorAction SilentlyContinue }
-  Remove-Item -Force -Path $state
+  Remove-Item -Force -Path $state -ErrorAction SilentlyContinue
 } else {
   Get-NetFirewallProfile -PolicyStore PersistentStore | Where-Object { $_.DefaultOutboundAction -eq 'Block' } |
     ForEach-Object { Set-NetFirewallProfile -Name $_.Name -DefaultOutboundAction NotConfigured }
@@ -138,4 +165,4 @@ async function isAdmin() {
   } catch { return false; }
 }
 
-module.exports = { enable, disable, isActive, isAdmin, cleanupTunAddresses, runPs, GROUP };
+module.exports = { enable, disable, isActive, isAdmin, cleanupTunAddresses, cleanClixml, runPs, GROUP };

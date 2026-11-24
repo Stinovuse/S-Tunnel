@@ -188,7 +188,15 @@ class Tunnel extends EventEmitter {
   }
 
   /** Полное отключение: ядро стоп + восстановление правил брандмауэра. */
-  async disconnect() {
+  disconnect() {
+    // Повторный вызов (двойной клик, трей + кнопка) ждёт уже идущее отключение
+    if (!this._disconnecting) {
+      this._disconnecting = this._disconnect().finally(() => { this._disconnecting = null; });
+    }
+    return this._disconnecting;
+  }
+
+  async _disconnect() {
     this.stopping = true;
     this.gen += 1;
     this.killCore();

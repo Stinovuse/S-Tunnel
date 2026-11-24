@@ -81,8 +81,13 @@ $('protocol').onchange = protoHint;
 
 $('save').onclick = save;
 $('toggle').onclick = async () => {
-  if (current === 'off') { if (await save()) api.connect(); }
-  else api.disconnect();
+  const btn = $('toggle');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    if (current === 'off') { if (await save()) await api.connect(); }
+    else { btn.textContent = 'Отключаю…'; await api.disconnect(); }
+  } finally { btn.disabled = current === 'connecting'; }
 };
 $('test').onclick = async () => {
   if (current !== 'on') { toast('Сначала подключитесь'); return; }

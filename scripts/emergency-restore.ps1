@@ -10,7 +10,7 @@ if (Test-Path $state) {
     if ($p -and $p.Name) { Set-NetFirewallProfile -Name $p.Name -Enabled $p.Enabled -DefaultOutboundAction $p.DefaultOutboundAction }
   }
   $names = @(@($s.rules) | Where-Object { $_ }); if ($names.Count) { Enable-NetFirewallRule -Name $names -ErrorAction SilentlyContinue }
-  Remove-Item -Force -Path $state
+  Remove-Item -Force -Path $state -ErrorAction SilentlyContinue
   Write-Host 'Правила брандмауэра восстановлены из сохранённого состояния.'
 } else {
   Get-NetFirewallProfile -PolicyStore PersistentStore | Where-Object { $_.DefaultOutboundAction -eq 'Block' } |

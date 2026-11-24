@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld('stunnel', {
   updateDownload: () => ipcRenderer.invoke('update-download'),
   updateInstall: () => ipcRenderer.invoke('update-install'),
   onUpdate: (cb) => ipcRenderer.on('update', (_e, d) => cb(d)),
+  appsAdd: () => ipcRenderer.invoke('apps-add'),
+  appsRemove: (p) => ipcRenderer.invoke('apps-remove', p),
   openEmergency: () => ipcRenderer.invoke('open-emergency'),
   onState: (cb) => ipcRenderer.on('state', (_e, d) => cb(d)),
   onLog: (cb) => ipcRenderer.on('log', (_e, d) => cb(d)),

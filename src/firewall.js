@@ -226,6 +226,28 @@ ConvertTo-Json -Compress -InputObject @($out)`;
   try { const j = JSON.parse(r || '[]'); return Array.isArray(j) ? j : [j]; } catch { return []; }
 }
 
+// ---- «Только через S Tunnel» ----
+const APPS_GROUP = 'STunnelApps';
+
+/** Ставит Block-правила на выбранные программы (или снимает все при пустом списке). */
+async function setAppBlocks(paths) {
+  const rules = paths.map((p) =>
+    `New-NetFirewallRule -DisplayName ${q('S Tunnel: без туннеля запрещено — ' + p.split('\\').pop())} -Group '${APPS_GROUP}' -Direction Outbound -Action Block -Program ${q(p)} | Out-Null`).join('\n');
+  return runPs(`Remove-NetFirewallRule -Group '${APPS_GROUP}' -ErrorAction SilentlyContinue
+${rules}
+'ok'`, 60000);
+}
+
+/** Закрывает запущенные процессы с этими путями; возвращает пути закрытых. */
+async function stopProcessesByPath(paths) {
+  if (!paths.length) return [];
+  const r = await runPs(`$want = @(${paths.map((p) => q(p.toLowerCase())).join(',')})
+$hit = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -and ($want -contains $_.ExecutablePath.ToLower()) })
+foreach ($p in $hit) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
+ConvertTo-Json -Compress -InputObject @($hit | ForEach-Object { [string]$_.ExecutablePath } | Select-Object -Unique)`, 60000);
+  try { const j = JSON.parse(r || '[]'); return Array.isArray(j) ? j : [j]; } catch { return []; }
+}
+
 async function isAdmin() {
   try {
     const r = await runPs(`([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)`, 20000);
@@ -233,4 +255,4 @@ async function isAdmin() {
   } catch { return false; }
 }
 
-module.exports = { enable, disable, resetDirectConnections, listDirectConnections, isActive, isAdmin, cleanupTunAddresses, cleanClixml, runPs, GROUP };
+module.exports = { setAppBlocks, stopProcessesByPath, APPS_GROUP, enable, disable, resetDirectConnections, listDirectConnections, isActive, isAdmin, cleanupTunAddresses, cleanClixml, runPs, GROUP };

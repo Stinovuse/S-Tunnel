@@ -1,11 +1,12 @@
 'use strict';
-const { app, BrowserWindow, Tray, Menu, ipcMain, safeStorage, nativeImage, dialog, shell } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, safeStorage, nativeImage, dialog, shell, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { Tunnel } = require('./src/tunnel');
 const { PROTOCOLS } = require('./src/core-config');
 const firewall = require('./src/firewall');
 const { Updater } = require('./src/updater');
+const { AppGuard, validateAppPath } = require('./src/appguard');
 
 if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
 
@@ -20,7 +21,7 @@ const emergencyScript = app.isPackaged
 
 const DEFAULTS = {
   host: '', port: 8080, protocol: 'http', username: '', passwordEnc: '',
-  allowLan: false, dnsServer: '1.1.1.1', autoConnect: false, cachedIp: '',
+  allowLan: false, dnsServer: '1.1.1.1', autoConnect: false, cachedIp: '', guardedApps: [],
 };
 
 function loadSettings() {
@@ -30,6 +31,8 @@ function loadSettings() {
   // миграция со старой версии, где был флажок tls
   if ('tls' in s) { if (!PROTOCOLS.includes(s.protocol) || s.protocol === 'http') s.protocol = s.tls ? 'https' : 'http'; delete s.tls; }
   if (!PROTOCOLS.includes(s.protocol)) s.protocol = 'http';
+  s.guardedApps = (Array.isArray(s.guardedApps) ? s.guardedApps : [])
+    .filter((a) => a && typeof a.path === 'string' && !validateAppPath(a.path));
   return s;
 }
 function saveSettings(s) {
@@ -58,6 +61,29 @@ const updater = new Updater({
   send: (ch, d) => { send(ch, d); if (d.state === 'ready') updateTray(); },
   log: (l) => tunnel.log(l),
 });
+
+// ---- «Только через S Tunnel» ----
+const lastNotified = new Map();
+const guard = new AppGuard({
+  tunnel,
+  getApps: () => loadSettings().guardedApps,
+  onBlocked: (a) => {
+    tunnel.log(`Закрыта программа ${a.name}: S Tunnel не подключён`);
+    const now = Date.now();
+    if (now - (lastNotified.get(a.path) || 0) < 5000) return;
+    lastNotified.set(a.path, now);
+    if (Notification.isSupported()) {
+      const n = new Notification({
+        title: `${a.name} закрыт`,
+        body: 'Эта программа работает только через S Tunnel. Нажмите, чтобы подключиться.',
+        icon: path.join(__dirname, 'assets', 'icon.png'),
+      });
+      n.on('click', () => { showWindow(); doConnect(); });
+      n.show();
+    }
+  },
+});
+tunnel.beforeRestore = () => guard.beforeRestore();
 
 tunnel.on('log', (line) => {
   const l = `[${new Date().toLocaleTimeString()}] ${line}`;
@@ -165,6 +191,34 @@ ipcMain.handle('save-settings', (_e, inc) => {
   return publicSettings(s);
 });
 
+ipcMain.handle('apps-add', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    title: 'Программа, которая будет работать только через S Tunnel',
+    filters: [{ name: 'Программы', extensions: ['exe'] }],
+    properties: ['openFile', 'multiSelections'],
+  });
+  if (r.canceled) return { apps: loadSettings().guardedApps };
+  const s = loadSettings();
+  const errors = [];
+  for (const p of r.filePaths) {
+    const err = validateAppPath(p);
+    if (err) { errors.push(`${path.basename(p)}: ${err}`); continue; }
+    if (s.guardedApps.some((a) => a.path.toLowerCase() === p.toLowerCase())) continue;
+    s.guardedApps.push({ path: p, name: path.basename(p, path.extname(p)) });
+  }
+  saveSettings(s);
+  await guard.sync();
+  return { apps: s.guardedApps, errors };
+});
+
+ipcMain.handle('apps-remove', async (_e, p) => {
+  const s = loadSettings();
+  s.guardedApps = s.guardedApps.filter((a) => a.path.toLowerCase() !== String(p).toLowerCase());
+  saveSettings(s);
+  await guard.sync();
+  return { apps: s.guardedApps };
+});
+
 ipcMain.handle('connect', () => doConnect());
 ipcMain.handle('disconnect', () => doDisconnect());
 ipcMain.handle('leak-test', () => tunnel.state === 'on' ? tunnel.runLeakTest() : []);
@@ -190,6 +244,7 @@ app.whenReady().then(async () => {
     dialog.showErrorBox('S Tunnel', 'Нужны права администратора (TUN-адаптер и брандмауэр). Запустите приложение от имени администратора.');
   }
   const s = loadSettings();
+  guard.sync().catch((e) => tunnel.log(`Защита программ: ${e.message}`));
   const afterUpdate = updater.consumeReconnectFlag();
   if (afterUpdate) tunnel.log(`Обновлено до версии ${app.getVersion()}. Переподключаюсь…`);
   if ((s.autoConnect || afterUpdate) && s.host) doConnect();

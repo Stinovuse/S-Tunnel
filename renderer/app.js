@@ -95,6 +95,30 @@ $('test').onclick = async () => {
   await api.leakTest();
   $('test').disabled = false; $('test').textContent = 'Проверить';
 };
+function renderApps(apps) {
+  const ul = $('apps'); ul.innerHTML = '';
+  if (!apps.length) {
+    const li = document.createElement('li'); li.className = 'empty';
+    li.textContent = 'Список пуст — все программы работают как обычно';
+    ul.append(li); return;
+  }
+  for (const a of apps) {
+    const li = document.createElement('li'); li.className = 'app';
+    const info = document.createElement('div');
+    const n = document.createElement('b'); n.textContent = a.name;
+    const p = document.createElement('span'); p.textContent = a.path;
+    info.append(n, p);
+    const rm = document.createElement('button'); rm.className = 'small link'; rm.textContent = 'Убрать';
+    rm.onclick = async () => renderApps((await api.appsRemove(a.path)).apps);
+    li.append(info, rm); ul.append(li);
+  }
+}
+$('appsAdd').onclick = async () => {
+  const r = await api.appsAdd();
+  renderApps(r.apps);
+  if (r.errors && r.errors.length) toast(r.errors.join('; '));
+};
+
 let upd = { state: 'idle' };
 function renderUpdate(u) {
   upd = u;
@@ -131,6 +155,7 @@ api.init().then((d) => {
   renderState(d.status);
   d.log.forEach(addLog);
   renderUpdate(d.update);
+  renderApps(d.settings.guardedApps || []);
   if (d.killSwitchLeft) {
     const b = $('banner');
     b.textContent = 'Kill switch остался включён после прошлого сбоя — интернет заблокирован. Подключитесь или нажмите «Отключить».';

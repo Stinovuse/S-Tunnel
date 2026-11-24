@@ -16,6 +16,7 @@ const MAX_RESTARTS = 5;
 class Tunnel extends EventEmitter {
   constructor({ corePath, workDir }) {
     super();
+    this.beforeRestore = null; // async-хук перед снятием kill switch (защита программ)
     this.corePath = corePath;
     this.workDir = workDir;
     this.proc = null;
@@ -224,6 +225,9 @@ class Tunnel extends EventEmitter {
     this.stopping = true;
     this.gen += 1;
     this.killCore();
+    if (this.beforeRestore) {
+      try { await this.beforeRestore(); } catch (e) { this.log(`Защита программ: ${e.message}`); }
+    }
     this.log('Восстанавливаю исходные правила брандмауэра…');
     try { await firewall.disable(); } catch (e) { this.log(`Ошибка восстановления: ${e.message}`); throw e; }
     this.leakResults = [];

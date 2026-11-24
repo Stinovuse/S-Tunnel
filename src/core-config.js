@@ -7,8 +7,9 @@
 // DNS всегда перехватывается и уходит как DNS-over-HTTPS ЧЕРЕЗ прокси.
 
 const TUN_NAME = 'STunnel';
-const TUN_V4 = '172.19.0.1';
-const TUN_V6 = 'fdfe:dcba:9876::1';
+// Редкая подсеть: 172.19.0.1 по умолчанию занимают v2rayN/Hiddify/Nekoray и др.
+const TUN_V4 = '172.31.249.1';
+const TUN_V6 = 'fdfe:5354:4e4c:1::1';
 
 const PRIVATE_RANGES = [
   '10.0.0.0/8',

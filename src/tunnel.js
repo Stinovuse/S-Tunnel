@@ -106,7 +106,12 @@ class Tunnel extends EventEmitter {
     }
   }
 
-  startCore() {
+  async startCore() {
+    await firewall.cleanupTunAddresses();
+    return this.spawnCore();
+  }
+
+  spawnCore() {
     return new Promise((resolve, reject) => {
       this.log('Запускаю ядро sing-box…');
       const p = spawn(this.corePath, ['run', '-c', this.cfgPath, '-D', this.workDir],
@@ -114,6 +119,7 @@ class Tunnel extends EventEmitter {
       this.proc = p;
       const myGen = this.gen;
       let started = false;
+      let fatal = '';
       const timer = setTimeout(() => {
         if (!started) { reject(new Error('Ядро не запустилось за 20 секунд')); this.killCore(); }
       }, 20000);
@@ -121,8 +127,10 @@ class Tunnel extends EventEmitter {
         for (const line of String(d).split(/\r?\n/)) {
           if (!line.trim()) continue;
           // не показываем пароль, если он вдруг попадёт в лог
-          const safe = this.settings?.password ? line.split(this.settings.password).join('***') : line;
+          const clean = line.replace(/\x1b\[[0-9;]*m/g, '');
+          const safe = this.settings?.password ? clean.split(this.settings.password).join('***') : clean;
           this.log(safe);
+          if (/FATAL/.test(safe)) fatal = safe.replace(/^.*FATAL\S*\s*(\[\d+\]\s*)?/, '');
           if (!started && /sing-box started/i.test(line)) { started = true; clearTimeout(timer); resolve(); }
         }
       };
@@ -133,7 +141,7 @@ class Tunnel extends EventEmitter {
       p.on('exit', (code) => {
         clearTimeout(timer);
         if (this.proc === p) this.proc = null;
-        if (!started) { reject(new Error(`Ядро завершилось с кодом ${code} — смотрите журнал`)); return; }
+        if (!started) { reject(new Error(explainFatal(fatal) || `Ядро завершилось с кодом ${code} — смотрите журнал`)); return; }
         if (!this.stopping && myGen === this.gen) this.onCrash(code);
       });
     });
@@ -189,6 +197,13 @@ class Tunnel extends EventEmitter {
     this.leakResults = [];
     this.setState('off', { lastError: '' });
   }
+}
+
+function explainFatal(f) {
+  if (!f) return '';
+  if (/already exists/i.test(f)) return `Адрес виртуального адаптера занят другой программой (VPN/прокси-клиент). Закройте её и подключитесь снова. (${f})`;
+  if (/access is denied|permission/i.test(f)) return `Нет прав администратора для создания адаптера. (${f})`;
+  return `Ядро не запустилось: ${f}`;
 }
 
 module.exports = { Tunnel };

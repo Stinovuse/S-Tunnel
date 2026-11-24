@@ -111,6 +111,26 @@ if (Test-Path $state) {
   return runPs(script);
 }
 
+/**
+ * Удаляет «зависшие» адреса туннеля, оставшиеся после принудительного завершения ядра
+ * (иначе: "set ipv4 address: The object already exists"). Подсеть уникальна для
+ * S Tunnel, поэтому чужие адаптеры это не затрагивает.
+ */
+async function cleanupTunAddresses() {
+  const script = `
+foreach ($ip in @(${q(TUN_V4)}, ${q(TUN_V6)})) {
+  foreach ($store in @('ActiveStore', 'PersistentStore')) {
+    Get-NetIPAddress -IPAddress $ip -PolicyStore $store -ErrorAction SilentlyContinue |
+      Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+  }
+}
+# Старая версия использовала 172.19.0.1 — чистим, только если адрес висит на нашем адаптере STunnel
+Get-NetIPAddress -InterfaceAlias 'STunnel' -ErrorAction SilentlyContinue |
+  Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+'ok'`;
+  try { await runPs(script, 30000); } catch { /* не критично: ядро само сообщит об ошибке */ }
+}
+
 async function isAdmin() {
   try {
     const r = await runPs(`([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)`, 20000);
@@ -118,4 +138,4 @@ async function isAdmin() {
   } catch { return false; }
 }
 
-module.exports = { enable, disable, isActive, isAdmin, runPs, GROUP };
+module.exports = { enable, disable, isActive, isAdmin, cleanupTunAddresses, runPs, GROUP };

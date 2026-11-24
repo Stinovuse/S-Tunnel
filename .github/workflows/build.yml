@@ -1,0 +1,56 @@
+name: Build Windows installer
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SING_BOX_VERSION: '1.13.19'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download sing-box core
+        shell: pwsh
+        run: |
+          $v = $env:SING_BOX_VERSION
+          $name = "sing-box-$v-windows-amd64"
+          Invoke-WebRequest "https://github.com/SagerNet/sing-box/releases/download/v$v/$name.zip" -OutFile sb.zip
+          Expand-Archive sb.zip -DestinationPath sb -Force
+          New-Item -ItemType Directory -Force bin | Out-Null
+          Copy-Item "sb/$name/*" bin/ -Recurse -Force
+          ./bin/sing-box.exe version
+
+      - name: Validate generated config with real sing-box
+        shell: pwsh
+        run: |
+          node test/config.test.js --write sb-test.json
+          ./bin/sing-box.exe check -c sb-test.json
+
+      - run: npm install --no-audit --no-fund
+
+      - name: Build installer
+        run: npx electron-builder --win nsis --x64 --publish never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: S-Tunnel-Setup
+          path: dist/*.exe
+
+      - name: Publish release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe

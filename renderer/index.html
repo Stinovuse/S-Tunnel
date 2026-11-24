@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'">
+  <title>S Tunnel</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div id="dot" class="dot off"></div>
+    <div>
+      <div class="title">S Tunnel</div>
+      <div id="stateText" class="sub">Отключено</div>
+    </div>
+    <button id="toggle" class="primary">Подключить</button>
+  </header>
+
+  <div id="banner" class="banner hidden"></div>
+
+  <section>
+    <h2>Прокси</h2>
+    <div class="row">
+      <label class="grow">Адрес<input id="host" placeholder="proxy.example.com или 1.2.3.4"></label>
+      <label class="port">Порт<input id="port" type="number" min="1" max="65535"></label>
+    </div>
+    <div class="row">
+      <label class="grow">Логин<input id="username" autocomplete="off"></label>
+      <label class="grow">Пароль<input id="password" type="password" autocomplete="off"></label>
+    </div>
+    <label class="check"><input id="tls" type="checkbox"> HTTPS-прокси (TLS до прокси)</label>
+    <label class="check"><input id="allowLan" type="checkbox"> Разрешить локальную сеть (принтеры, NAS) мимо прокси</label>
+    <label class="check"><input id="autoConnect" type="checkbox"> Запускать при входе в Windows и сразу подключаться</label>
+    <details>
+      <summary>Дополнительно</summary>
+      <label>DNS-over-HTTPS сервер (IP, запросы идут через прокси)<input id="dnsServer" placeholder="1.1.1.1"></label>
+    </details>
+    <button id="save">Сохранить</button>
+  </section>
+
+  <section>
+    <div class="row between"><h2>Проверка утечек</h2><button id="test" class="small">Проверить</button></div>
+    <div id="realIp" class="muted"></div>
+    <ul id="results"></ul>
+  </section>
+
+  <section class="logsec">
+    <div class="row between"><h2>Журнал</h2><button id="emergency" class="small link">Аварийное восстановление</button></div>
+    <pre id="log"></pre>
+  </section>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>

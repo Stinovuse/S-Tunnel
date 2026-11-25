@@ -5,6 +5,7 @@ const fs = require('fs');
 const { Tunnel } = require('./src/tunnel');
 const { PROTOCOLS } = require('./src/core-config');
 const firewall = require('./src/firewall');
+const tz = require('./src/timezone');
 const { Updater } = require('./src/updater');
 const { AppGuard } = require('./src/appguard');
 const { validateAppPath, validateAppDir, validatePfn, lc } = require('./src/appscan');
@@ -22,7 +23,7 @@ const emergencyScript = app.isPackaged
 
 const DEFAULTS = {
   host: '', port: 8080, protocol: 'http', username: '', passwordEnc: '',
-  allowLan: false, dnsServer: '1.1.1.1', autoConnect: false, cachedIp: '', guardedApps: [],
+  allowLan: false, dnsServer: '1.1.1.1', autoConnect: false, cachedIp: '', guardedApps: [], syncTimezone: true,
 };
 
 function loadSettings() {
@@ -96,6 +97,29 @@ const guard = new AppGuard({
   },
 });
 tunnel.beforeRestore = () => guard.beforeRestore();
+
+// ---- Часовой пояс прокси ----
+let tzInfo = null; // { iana, win, place, ip }
+async function applyProxyTimezone() {
+  if (!loadSettings().syncTimezone) return;
+  tunnel.log('Определяю часовой пояс прокси…');
+  const info = await tz.detectProxyTimezone();
+  const win = await tz.ianaToWindows(info.iana);
+  await tz.apply(win);
+  tzInfo = { ...info, win };
+  tunnel.log(`Часовой пояс Windows: ${info.iana} (${win})${info.place ? `, как у прокси — ${info.place}` : ''}`);
+}
+tunnel.afterConnect = () => applyProxyTimezone().catch((e) => { tzInfo = { error: e.message }; throw e; });
+tunnel.afterRestore = async () => { await tz.restore(); if (tzInfo && !tzInfo.error) tunnel.log('Часовой пояс Windows возвращён'); tzInfo = null; };
+tunnel.extraChecks = async () => {
+  if (!loadSettings().syncTimezone) return [];
+  if (!tzInfo || tzInfo.error) {
+    return [{ name: 'Часовой пояс', ok: false, detail: `не совпадает с прокси: ${tzInfo?.error || 'не определён'}` }];
+  }
+  const cur = await tz.currentWindowsZone().catch(() => '');
+  const ok = cur === tzInfo.win;
+  return [{ name: 'Часовой пояс', ok, detail: ok ? `${tzInfo.iana}${tzInfo.place ? ` — ${tzInfo.place}` : ''}, как у прокси` : `в Windows ${cur}, а у прокси ${tzInfo.win}` }];
+};
 
 tunnel.on('log', (line) => {
   const l = `[${new Date().toLocaleTimeString()}] ${line}`;
@@ -190,7 +214,7 @@ ipcMain.handle('save-settings', (_e, inc) => {
   if (s.host !== inc.host.trim()) s.cachedIp = '';
   Object.assign(s, {
     host: inc.host.trim(), port, protocol: PROTOCOLS.includes(inc.protocol) ? inc.protocol : 'http', username: (inc.username || '').trim(),
-    allowLan: !!inc.allowLan, autoConnect: !!inc.autoConnect,
+    allowLan: !!inc.allowLan, autoConnect: !!inc.autoConnect, syncTimezone: inc.syncTimezone !== false,
     dnsServer: /^[0-9.]+$/.test(inc.dnsServer || '') ? inc.dnsServer : '1.1.1.1',
   });
   if (typeof inc.password === 'string' && inc.password !== '') {
@@ -200,6 +224,11 @@ ipcMain.handle('save-settings', (_e, inc) => {
   if (inc.clearPassword) s.passwordEnc = '';
   saveSettings(s);
   setAutostart(s.autoConnect);
+  // переключили «часовой пояс прокси» при включённом туннеле — применяем сразу
+  if (tunnel.state === 'on') {
+    if (s.syncTimezone && !tzInfo?.win) applyProxyTimezone().catch((e) => tunnel.log(`Часовой пояс: ${e.message}`));
+    if (!s.syncTimezone && tzInfo) tz.restore().then(() => { tzInfo = null; tunnel.log('Часовой пояс Windows возвращён'); }).catch(() => {});
+  }
   return publicSettings(s);
 });
 
@@ -308,6 +337,7 @@ app.whenReady().then(async () => {
   const afterUpdate = updater.consumeReconnectFlag();
   if (afterUpdate) tunnel.log(`Обновлено до версии ${app.getVersion()}. Переподключаюсь…`);
   if ((s.autoConnect || afterUpdate) && s.host) doConnect();
+  else tz.restore().catch(() => {}); // остался пояс прокси после сбоя — возвращаем ваш
   updater.start();
 });
 

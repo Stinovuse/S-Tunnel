@@ -28,6 +28,7 @@ function fillSettings(s) {
   protoHint();
   $('allowLan').checked = !!s.allowLan;
   $('autoConnect').checked = !!s.autoConnect;
+  $('syncTimezone').checked = s.syncTimezone !== false;
   $('dnsServer').value = s.dnsServer || '1.1.1.1';
 }
 
@@ -63,7 +64,7 @@ async function save() {
     const s = await api.save({
       host: $('host').value, port: $('port').value, username: $('username').value,
       password: $('password').value, protocol: $('protocol').value, allowLan: $('allowLan').checked,
-      autoConnect: $('autoConnect').checked, dnsServer: $('dnsServer').value.trim(),
+      autoConnect: $('autoConnect').checked, syncTimezone: $('syncTimezone').checked, dnsServer: $('dnsServer').value.trim(),
     });
     fillSettings(s);
     toast(current === 'on' ? 'Сохранено. Переподключитесь, чтобы применить.' : 'Сохранено');

@@ -28,5 +28,15 @@ if (Test-Path $state) {
     ForEach-Object { Set-NetFirewallProfile -Name $_.Name -DefaultOutboundAction NotConfigured }
   Write-Host 'Сохранённого состояния нет; исходящие соединения разрешены по умолчанию.'
 }
+$tzState = Join-Path $env:ProgramData 'STunnel\timezone.json'
+if (Test-Path $tzState) {
+  try {
+    $t = Get-Content -Raw -Path $tzState | ConvertFrom-Json
+    if ($t.original -and (Get-TimeZone -ListAvailable | Where-Object { $_.Id -eq $t.original })) { Set-TimeZone -Id $t.original }
+    if ($null -ne $t.tzauto -and @(2,3,4) -contains [int]$t.tzauto) { Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\tzautoupdate' -Name Start -Value ([int]$t.tzauto) }
+    Write-Host "Часовой пояс возвращён: $($t.original)"
+  } catch {}
+  Remove-Item -Force -Path $tzState -ErrorAction SilentlyContinue
+}
 Write-Host 'Готово. Интернет должен работать.'
 Write-Host 'Приложения из списка «Только через S Tunnel» по-прежнему выходят в интернет только через туннель — так задумано.'

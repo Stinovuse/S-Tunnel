@@ -17,6 +17,9 @@ class Tunnel extends EventEmitter {
   constructor({ corePath, workDir }) {
     super();
     this.beforeRestore = null; // async-хук перед снятием kill switch (защита программ)
+    this.afterConnect = null;  // async-хук после подключения (часовой пояс прокси)
+    this.afterRestore = null;  // async-хук после отключения (вернуть часовой пояс)
+    this.extraChecks = null;   // async () => [{name, ok, detail}] — доп. пункты проверки утечек
     this.corePath = corePath;
     this.workDir = workDir;
     this.proc = null;
@@ -106,6 +109,9 @@ class Tunnel extends EventEmitter {
       this.proxyIp = proxyIp;
       await this.resetOldConnections();
       this.setState('on');
+      if (this.afterConnect) {
+        try { await this.afterConnect(); } catch (e) { this.log(`После подключения: ${e.message}`); }
+      }
       await this.runLeakTest();
     } catch (e) {
       this.log(`Ошибка: ${e.message}`);
@@ -199,6 +205,9 @@ class Tunnel extends EventEmitter {
       proxyIp: this.proxyIp,
       allowLan: this.settings?.allowLan,
     });
+    if (this.extraChecks) {
+      try { this.leakResults.push(...(await this.extraChecks())); } catch {}
+    }
     for (const r of this.leakResults) this.log(`${r.ok ? '✔' : '✖'} ${r.name}: ${r.detail}`);
     this.emit('state', this.snapshot());
     return this.leakResults;
@@ -231,6 +240,9 @@ class Tunnel extends EventEmitter {
     this.log('Восстанавливаю исходные правила брандмауэра…');
     try { await firewall.disable(); } catch (e) { this.log(`Ошибка восстановления: ${e.message}`); throw e; }
     this.leakResults = [];
+    if (this.afterRestore) {
+      try { await this.afterRestore(); } catch (e) { this.log(`После отключения: ${e.message}`); }
+    }
     this.setState('off', { lastError: '' });
   }
 }

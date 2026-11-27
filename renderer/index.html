@@ -64,6 +64,15 @@
 
   <section>
     <div class="row between">
+      <h2>Исключения — без прокси</h2>
+      <button id="exclAdd" class="small">+ Добавить приложение</button>
+    </div>
+    <div class="muted">Эти приложения выходят в интернет напрямую, мимо прокси: сайты и серверы видят ваш обычный IP. Подходит для банков, онлайн-игр с низким пингом, локальных сервисов. Всё остальное по-прежнему идёт через прокси, а kill switch продолжает работать.</div>
+    <ul id="exclApps"></ul>
+  </section>
+
+  <section>
+    <div class="row between">
       <h2>Обновления</h2>
       <span id="appVersion" class="muted"></span>
     </div>
@@ -80,7 +89,7 @@
 
   <div id="picker" class="modal hidden">
     <div class="sheet">
-      <div class="row between"><h2>Выберите приложения</h2><button id="pkClose" class="small link">Закрыть</button></div>
+      <div class="row between"><h2 id="pkTitle">Выберите приложения</h2><button id="pkClose" class="small link">Закрыть</button></div>
       <input id="pkSearch" placeholder="Поиск: Telegram, Chrome, Discord…">
       <ul id="pkList"><li class="empty">Загружаю список приложений…</li></ul>
       <div class="row between pkfoot">

@@ -23,7 +23,7 @@ const emergencyScript = app.isPackaged
 
 const DEFAULTS = {
   host: '', port: 8080, protocol: 'http', username: '', passwordEnc: '',
-  allowLan: false, dnsServer: '1.1.1.1', autoConnect: false, cachedIp: '', guardedApps: [], syncTimezone: true,
+  allowLan: false, dnsServer: '1.1.1.1', autoConnect: false, cachedIp: '', guardedApps: [], excludedApps: [], syncTimezone: true,
 };
 
 function loadSettings() {
@@ -33,11 +33,13 @@ function loadSettings() {
   // миграция со старой версии, где был флажок tls
   if ('tls' in s) { if (!PROTOCOLS.includes(s.protocol) || s.protocol === 'http') s.protocol = s.tls ? 'https' : 'http'; delete s.tls; }
   if (!PROTOCOLS.includes(s.protocol)) s.protocol = 'http';
-  // элементы: {type:'dir'|'exe', path, name}; старые записи (без type) — это .exe
-  s.guardedApps = (Array.isArray(s.guardedApps) ? s.guardedApps : [])
+  // элементы: {type:'dir'|'exe'|'pkg', path, name}; старые записи (без type) — это .exe
+  const clean = (list) => (Array.isArray(list) ? list : [])
     .filter((a) => a && typeof a.path === 'string')
     .map((a) => ({ type: ['dir', 'pkg'].includes(a.type) ? a.type : 'exe', path: a.path, name: String(a.name || path.basename(a.path)) }))
     .filter((a) => !validateEntry(a));
+  s.guardedApps = clean(s.guardedApps);
+  s.excludedApps = clean(s.excludedApps);
   return s;
 }
 function validateEntry(e) {
@@ -112,6 +114,13 @@ async function applyProxyTimezone() {
 tunnel.afterConnect = () => applyProxyTimezone().catch((e) => { tzInfo = { error: e.message }; throw e; });
 tunnel.afterRestore = async () => { await tz.restore(); if (tzInfo && !tzInfo.error) tunnel.log('Часовой пояс Windows возвращён'); tzInfo = null; };
 tunnel.extraChecks = async () => {
+  const s0 = loadSettings();
+  const excl = s0.excludedApps.length
+    ? [{ name: 'Исключения', ok: true, detail: `напрямую, с вашим IP: ${s0.excludedApps.map((x) => x.name).join(', ')}` }]
+    : [];
+  return [...excl, ...(await tzCheck())];
+};
+async function tzCheck() {
   if (!loadSettings().syncTimezone) return [];
   if (!tzInfo || tzInfo.error) {
     return [{ name: 'Часовой пояс', ok: false, detail: `не совпадает с прокси: ${tzInfo?.error || 'не определён'}` }];
@@ -232,30 +241,57 @@ ipcMain.handle('save-settings', (_e, inc) => {
   return publicSettings(s);
 });
 
-function appsView() {
+// Два списка приложений: guarded — «Только через S Tunnel», excluded — «Исключения (без прокси)»
+const LISTS = { guarded: 'guardedApps', excluded: 'excludedApps' };
+const listKey = (which) => LISTS[which] || 'guardedApps';
+
+function appsView(which = 'guarded') {
   const s = loadSettings();
   let counts = {};
-  try { counts = guard.counts(); } catch {}
-  return s.guardedApps.map((a) => ({
+  if (which === 'guarded') { try { counts = guard.counts(); } catch {} }
+  return s[listKey(which)].map((a) => ({
     ...a, count: counts[a.path]?.n ?? null, truncated: !!counts[a.path]?.truncated, missing: !!counts[a.path]?.missing,
   }));
 }
 
-async function addApps(entries) {
+/** Пересекаются ли два элемента (одно и то же приложение или одно внутри другого). */
+function overlaps(a, b) {
+  const pa = lc(a.path), pb = lc(b.path);
+  if (pa === pb) return true;
+  if (a.type === 'dir' && b.type !== 'pkg' && pb.startsWith(pa + '\\')) return true;
+  if (b.type === 'dir' && a.type !== 'pkg' && pa.startsWith(pb + '\\')) return true;
+  return false;
+}
+
+/** Применить изменения списка: защита — фоновой задаче, исключения — перезапуском ядра. */
+async function applyList(which) {
+  if (which === 'guarded') { await guard.publish(); return; }
+  if (tunnel.state === 'on') {
+    tunnel.log('Список исключений изменён — перезапускаю ядро (интернет на пару секунд заблокирован, утечки нет)…');
+    const s = loadSettings();
+    tunnel.connect({ ...s, password: decryptPassword(s) }, { force: true });
+  }
+}
+
+async function addApps(which, entries) {
   const s = loadSettings();
+  const key = listKey(which);
+  const otherKey = key === 'guardedApps' ? 'excludedApps' : 'guardedApps';
+  const otherName = key === 'guardedApps' ? '«Исключения»' : '«Только через S Tunnel»';
   const errors = [];
   for (const e of entries) {
     const err = validateEntry(e);
     if (err) { errors.push(`${e.name}: ${err}`); continue; }
-    if (s.guardedApps.some((a) => lc(a.path) === lc(e.path))) continue;
-    s.guardedApps.push({ type: e.type, path: e.path, name: e.name });
+    if (s[otherKey].some((o) => overlaps(o, e))) { errors.push(`${e.name}: уже в списке ${otherName} — сначала уберите оттуда`); continue; }
+    if (s[key].some((a) => lc(a.path) === lc(e.path))) continue;
+    s[key].push({ type: e.type, path: e.path, name: e.name });
   }
   saveSettings(s);
-  await guard.publish();
-  return { apps: appsView(), errors };
+  await applyList(which);
+  return { apps: appsView(which), errors };
 }
 
-ipcMain.handle('apps-list', () => appsView());
+ipcMain.handle('apps-list', (_e, which) => appsView(which));
 ipcMain.handle('guard-status', () => firewall.guardStatus());
 
 // Установленные приложения из меню «Пуск»: приложение = папка, где лежит его программа
@@ -281,31 +317,32 @@ ipcMain.handle('apps-installed', async () => {
   return [...byDir.values()].sort((a, b) => a.name.localeCompare(b.name, 'ru'));
 });
 
-ipcMain.handle('apps-add-entries', (_e, entries) => addApps(
+ipcMain.handle('apps-add-entries', (_e, which, entries) => addApps(which,
   (Array.isArray(entries) ? entries : []).filter((x) => x && typeof x.path === 'string')
     .map((x) => ({ type: ['dir', 'pkg'].includes(x.type) ? x.type : 'exe', path: x.path, name: String(x.name || path.basename(x.path)) }))));
 
-ipcMain.handle('apps-add-folder', async () => {
+ipcMain.handle('apps-add-folder', async (_e, which) => {
   const r = await dialog.showOpenDialog(win, { title: 'Папка, в которой установлено приложение', properties: ['openDirectory'] });
-  if (r.canceled || !r.filePaths[0]) return { apps: appsView() };
+  if (r.canceled || !r.filePaths[0]) return { apps: appsView(which) };
   const d = r.filePaths[0];
-  return addApps([{ type: 'dir', path: d, name: path.basename(d) }]);
+  return addApps(which, [{ type: 'dir', path: d, name: path.basename(d) }]);
 });
 
-ipcMain.handle('apps-add-exe', async () => {
+ipcMain.handle('apps-add-exe', async (_e, which) => {
   const r = await dialog.showOpenDialog(win, {
     title: 'Отдельная программа (.exe)', filters: [{ name: 'Программы', extensions: ['exe'] }], properties: ['openFile', 'multiSelections'],
   });
-  if (r.canceled) return { apps: appsView() };
-  return addApps(r.filePaths.map((p) => ({ type: 'exe', path: p, name: path.basename(p, path.extname(p)) })));
+  if (r.canceled) return { apps: appsView(which) };
+  return addApps(which, r.filePaths.map((p) => ({ type: 'exe', path: p, name: path.basename(p, path.extname(p)) })));
 });
 
-ipcMain.handle('apps-remove', async (_e, p) => {
+ipcMain.handle('apps-remove', async (_e, which, p) => {
   const s = loadSettings();
-  s.guardedApps = s.guardedApps.filter((a) => lc(a.path) !== lc(p));
+  const key = listKey(which);
+  s[key] = s[key].filter((a) => lc(a.path) !== lc(p));
   saveSettings(s);
-  await guard.publish();
-  return { apps: appsView() };
+  await applyList(which);
+  return { apps: appsView(which) };
 });
 
 ipcMain.handle('connect', () => doConnect());

@@ -31,8 +31,23 @@ const PRIVATE_RANGES = [
  * @param {boolean} o.allowLan    пускать локальную сеть (принтеры, NAS) мимо туннеля
  * @param {string} o.dnsServer    IP DoH-сервера, например 1.1.1.1
  * @param {string} [o.logLevel]
+ * @param {Array<{type:'dir'|'exe'|'pkg', path:string}>} [o.excluded]  приложения-исключения: идут напрямую
  */
 const PROTOCOLS = ['http', 'https', 'socks5'];
+
+// Регулярки путей процессов (RE2) для исключений
+const reEsc = (x) => String(x).replace(/[\\.+*?()|[\]{}^$]/g, '\\$&');
+function exclusionRegexes(list = []) {
+  const { pkgPathRegex } = require('./appscan');
+  const out = [];
+  for (const a of list) {
+    if (!a || typeof a.path !== 'string') continue;
+    if (a.type === 'dir') out.push(`(?i)^${reEsc(a.path.replace(/[\\/]+$/, ''))}\\\\`);
+    else if (a.type === 'pkg') { const rx = pkgPathRegex(a.path); if (rx) out.push(`(?i)${rx}`); }
+    else out.push(`(?i)^${reEsc(a.path)}$`);
+  }
+  return out;
+}
 const supportsUdp = (protocol) => protocol === 'socks5';
 
 function buildConfig(o) {
@@ -53,6 +68,9 @@ function buildConfig(o) {
     { protocol: 'dns', action: 'hijack-dns' },
     { port: 53, action: 'hijack-dns' },
   ];
+  // Исключения: эти приложения идут напрямую (без прокси, с вашим обычным IP), TCP и UDP
+  const excl = exclusionRegexes(o.excluded);
+  if (excl.length) rules.push({ process_path_regex: excl, action: 'route', outbound: 'direct' });
   // Для HTTP(S) UDP отклоняем (QUIC, WebRTC/STUN, игры) — пусть программы падают на TCP
   if (!supportsUdp(protocol)) rules.push({ network: 'udp', action: 'reject' });
   rules.push({ ip_is_private: true, action: 'reject' });
@@ -79,13 +97,14 @@ function buildConfig(o) {
       strategy: 'ipv4_only',
     },
     inbounds: [tun],
-    outbounds: [proxy],
+    outbounds: excl.length ? [proxy, { type: 'direct', tag: 'direct' }] : [proxy],
     route: {
       auto_detect_interface: true, // сокеты самого ядра привязаны к физ. адаптеру — без петли
+      ...(excl.length ? { find_process: true } : {}),
       rules,
       final: 'proxy',
     },
   };
 }
 
-module.exports = { buildConfig, supportsUdp, PROTOCOLS, TUN_NAME, TUN_V4, TUN_V6, PRIVATE_RANGES };
+module.exports = { buildConfig, supportsUdp, PROTOCOLS, exclusionRegexes, TUN_NAME, TUN_V4, TUN_V6, PRIVATE_RANGES };

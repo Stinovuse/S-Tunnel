@@ -110,12 +110,17 @@ async function refreshGuard(apps) {
   $('guardState').textContent = text;
 }
 
-function renderApps(apps) {
-  refreshGuard(apps);
-  const ul = $('apps'); ul.innerHTML = '';
+const LIST_UL = { guarded: 'apps', excluded: 'exclApps' };
+const EMPTY = {
+  guarded: 'Список пуст — все приложения работают как обычно',
+  excluded: 'Список пуст — все приложения идут через прокси',
+};
+function renderApps(apps, which = 'guarded') {
+  if (which === 'guarded') refreshGuard(apps);
+  const ul = $(LIST_UL[which]); ul.innerHTML = '';
   if (!apps.length) {
     const li = document.createElement('li'); li.className = 'empty';
-    li.textContent = 'Список пуст — все приложения работают как обычно';
+    li.textContent = EMPTY[which];
     ul.append(li); return;
   }
   for (const a of apps) {
@@ -124,19 +129,19 @@ function renderApps(apps) {
     const n = document.createElement('b'); n.textContent = a.name;
     const p = document.createElement('span');
     const c = a.count == null ? '' : ` · ${a.count}${a.truncated ? '+' : ''} ${plural(a.count, 'программа', 'программы', 'программ')}`;
-    if (a.type === 'dir') p.textContent = `Приложение целиком${c} — ${a.path}`;
-    else if (a.type === 'pkg') p.textContent = a.missing ? `Пакет ${a.path} — сейчас не установлен` : `Приложение целиком (пакет MSIX/Store)${c}`;
+    if (a.type === 'dir') p.textContent = `Приложение целиком${which === 'guarded' ? c : ''} — ${a.path}`;
+    else if (a.type === 'pkg') p.textContent = a.missing ? `Пакет ${a.path} — сейчас не установлен` : `Приложение целиком (пакет MSIX/Store)${which === 'guarded' ? c : ''}`;
     else p.textContent = `Только этот .exe — ${a.path}`;
     p.title = a.path;
     info.append(n, p);
     const rm = document.createElement('button'); rm.className = 'small link'; rm.textContent = 'Убрать';
-    rm.onclick = async () => renderApps((await api.appsRemove(a.path)).apps);
+    rm.onclick = async () => renderApps((await api.appsRemove(which, a.path)).apps, which);
     li.append(info, rm); ul.append(li);
   }
 }
 
-function afterAdd(r) {
-  renderApps(r.apps);
+function afterAdd(r, which) {
+  renderApps(r.apps, which);
   if (r.errors && r.errors.length) toast(r.errors.join('; '));
 }
 
@@ -168,7 +173,11 @@ function renderPicker() {
   $('pkAdd').textContent = picked.size ? `Добавить (${picked.size})` : 'Добавить';
   $('pkAdd').disabled = !picked.size;
 }
-async function openPicker() {
+let pickerFor = 'guarded';
+const PICK_TITLE = { guarded: 'Только через S Tunnel', excluded: 'Исключения — без прокси' };
+async function openPicker(which) {
+  pickerFor = which;
+  $('pkTitle').textContent = `Выберите приложения · ${PICK_TITLE[which]}`;
   picked.clear(); $('pkSearch').value = '';
   $('picker').classList.remove('hidden');
   $('pkList').innerHTML = '<li class="empty">Загружаю список приложений…</li>';
@@ -177,17 +186,18 @@ async function openPicker() {
   $('pkSearch').focus();
 }
 const closePicker = () => $('picker').classList.add('hidden');
-$('appsAdd').onclick = openPicker;
+$('appsAdd').onclick = () => openPicker('guarded');
+$('exclAdd').onclick = () => openPicker('excluded');
 $('pkClose').onclick = closePicker;
 $('pkSearch').oninput = renderPicker;
 $('pkAdd').onclick = async () => {
   const entries = installed.filter((a) => picked.has(a.path));
   $('pkAdd').disabled = true; $('pkAdd').textContent = 'Добавляю…';
-  afterAdd(await api.appsAddEntries(entries));
+  afterAdd(await api.appsAddEntries(pickerFor, entries), pickerFor);
   closePicker();
 };
-$('pkFolder').onclick = async () => { const r = await api.appsAddFolder(); afterAdd(r); if (!r.errors?.length) closePicker(); };
-$('pkExe').onclick = async () => { const r = await api.appsAddExe(); afterAdd(r); if (!r.errors?.length) closePicker(); };
+$('pkFolder').onclick = async () => { const r = await api.appsAddFolder(pickerFor); afterAdd(r, pickerFor); if (!r.errors?.length) closePicker(); };
+$('pkExe').onclick = async () => { const r = await api.appsAddExe(pickerFor); afterAdd(r, pickerFor); if (!r.errors?.length) closePicker(); };
 
 let upd = { state: 'idle' };
 function renderUpdate(u) {
@@ -225,7 +235,8 @@ api.init().then((d) => {
   renderState(d.status);
   d.log.forEach(addLog);
   renderUpdate(d.update);
-  api.appsList().then(renderApps);
+  api.appsList('guarded').then((a) => renderApps(a, 'guarded'));
+  api.appsList('excluded').then((a) => renderApps(a, 'excluded'));
   if (d.killSwitchLeft) {
     const b = $('banner');
     b.textContent = 'Kill switch остался включён после прошлого сбоя — интернет заблокирован. Подключитесь или нажмите «Отключить».';

@@ -44,6 +44,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           ./bin/sing-box.exe check -c sb-test-socks.json
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          ./bin/sing-box.exe check -c sb-test-excl.json
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - run: npm install --no-audit --no-fund
 

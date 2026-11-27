@@ -132,7 +132,8 @@ Log 'started' $PID
 $t = $null
 $stamp = -1
 $lastScan = [datetime]::MinValue
-$wasUp = $null
+$downSince = Get-Date   # при старте туннеля ещё нет — через 5 секунд закроем выбранные приложения
+$swept = $false
 
 while ($true) {
   try {
@@ -145,10 +146,13 @@ while ($true) {
       $lastScan = Get-Date
     }
 
+    # Туннель пропал больше чем на 5 секунд -> закрываем выбранные приложения.
+    # Короткие перерывы (перезапуск ядра) не трогаем: сеть у них всё равно заблокирована правилом.
     $up = Test-TunnelUp
-    if ($up -ne $wasUp) {
-      if (-not $up) { Stop-Guarded $t }   # туннель пропал -> закрываем выбранные приложения
-      $wasUp = $up
+    if ($up) { $downSince = $null; $swept = $false }
+    elseif (-not $swept) {
+      if (-not $downSince) { $downSince = Get-Date }
+      if (((Get-Date) - $downSince).TotalSeconds -ge 5) { Stop-Guarded $t; $swept = $true }
     }
 
     $e = Wait-Event -SourceIdentifier stunnel_guard -Timeout 2

@@ -37,9 +37,26 @@ assert.strictEqual(sk.dns.servers[0].detour, 'proxy');
 const bad = buildConfig({ ...base, protocol: 'weird' });
 assert.ok(bad.route.rules.some((r) => r.network === 'udp' && r.action === 'reject'));
 
+// Исключения: правило process_path_regex -> direct раньше блокировки UDP, find_process включён
+const ex = buildConfig({ ...base, excluded: [
+  { type: 'dir', path: 'C:\\Program Files (x86)\\Steam' },
+  { type: 'exe', path: 'C:\\Games\\a+b.exe' },
+  { type: 'pkg', path: 'Claude_pzs8sxrjxfjjc' },
+] });
+assert.deepStrictEqual(ex.outbounds.map((o) => o.tag), ['proxy', 'direct']);
+assert.strictEqual(ex.route.find_process, true);
+const exIdx = ex.route.rules.findIndex((r) => r.outbound === 'direct');
+const udpIdx = ex.route.rules.findIndex((r) => r.network === 'udp');
+assert.ok(exIdx > 0 && exIdx < udpIdx, 'исключения раньше блокировки UDP');
+assert.strictEqual(ex.route.rules[exIdx].process_path_regex.length, 3);
+assert.ok(new RegExp(ex.route.rules[exIdx].process_path_regex[0].replace('(?i)', ''), 'i').test('c:\\program files (x86)\\steam\\steam.exe'));
+assert.strictEqual(ex.route.final, 'proxy', 'всё остальное — через прокси');
+assert.strictEqual(c.outbounds.length, 1, 'без исключений прямого выхода нет');
+
 const i = process.argv.indexOf('--write');
 if (i > 0) {
   fs.writeFileSync(process.argv[i + 1], JSON.stringify(c, null, 2));
   fs.writeFileSync(process.argv[i + 1].replace(/\.json$/, '-socks.json'), JSON.stringify(sk, null, 2));
+  fs.writeFileSync(process.argv[i + 1].replace(/\.json$/, '-excl.json'), JSON.stringify(ex, null, 2));
 }
 console.log('config tests: OK');

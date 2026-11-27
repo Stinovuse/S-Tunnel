@@ -81,8 +81,14 @@ async function isActive() {
  * @param {number} o.proxyPort
  * @param {boolean} o.allowLan
  * @param {boolean} o.udp       SOCKS5: разрешить ядру UDP к серверу прокси
+ * @param {boolean} o.direct    есть приложения-исключения: ядру разрешён прямой выход
  */
 async function enable(o) {
+  // Исключения работают через ядро (правило process_path -> direct), поэтому прямой выход
+  // разрешён только sing-box.exe — программы по-прежнему не могут выйти мимо туннеля сами.
+  const directRule = o.direct
+    ? `New-NetFirewallRule -DisplayName 'STunnel: ядро -> напрямую (исключения)' -Group '${GROUP}' -Direction Outbound -Action Allow -Program ${q(o.corePath)} | Out-Null`
+    : '';
   // UDP-ретранслятор SOCKS5 выдаёт порт динамически, поэтому порт не ограничиваем,
   // но адрес — строго IP прокси и только для sing-box.exe.
   const udpRule = o.udp
@@ -114,6 +120,7 @@ New-NetFirewallRule -DisplayName 'STunnel: трафик внутри тунне�
 New-NetFirewallRule -DisplayName 'STunnel: DHCP' -Group '${GROUP}' -Direction Outbound -Action Allow -Protocol UDP -LocalPort 68 -RemotePort 67 | Out-Null
 New-NetFirewallRule -DisplayName 'STunnel: DHCPv6' -Group '${GROUP}' -Direction Outbound -Action Allow -Protocol UDP -LocalPort 546 -RemotePort 547 | Out-Null
 ${udpRule}
+${directRule}
 ${lanRule}
 'ok'`;
   return runPs(script);
@@ -179,8 +186,9 @@ function directConnFilter(o) {
   return `
 $phys = @(${phys})
 $proxy = ${q(o.proxyIp)}
+$corePids = @(Get-Process -Name 'sing-box' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
 $conns = @(Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | Where-Object {
-  ($phys -contains $_.LocalAddress) -and ($_.RemoteAddress -ne $proxy) -and
+  ($phys -contains $_.LocalAddress) -and ($_.RemoteAddress -ne $proxy) -and ($corePids -notcontains $_.OwningProcess) -and
   ($_.RemoteAddress -notmatch '^(127\\.|::1$)') ${o.allowLan ? `-and ($_.RemoteAddress -notmatch '${PRIVATE_RE}')` : ''}
 })`;
 }

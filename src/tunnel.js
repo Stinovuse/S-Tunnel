@@ -73,8 +73,10 @@ class Tunnel extends EventEmitter {
     }
   }
 
-  async connect(settings) {
-    if (this.state === 'connecting' || this.state === 'on') return;
+  /** @param {{force?:boolean}} [opts]  force: переподключиться при уже включённом туннеле (kill switch не снимается) */
+  async connect(settings, opts = {}) {
+    if (this.state === 'connecting') return;
+    if (this.state === 'on' && !opts.force) return;
     this.gen += 1;
     this.killCore();
     this.settings = settings;
@@ -96,12 +98,12 @@ class Tunnel extends EventEmitter {
       }
 
       this.log('Включаю kill switch (Windows Firewall)…');
-      await firewall.enable({ corePath: this.corePath, proxyIp, proxyPort: settings.port, allowLan: settings.allowLan, udp: supportsUdp(settings.protocol) });
+      await firewall.enable({ corePath: this.corePath, proxyIp, proxyPort: settings.port, allowLan: settings.allowLan, udp: supportsUdp(settings.protocol), direct: (settings.excludedApps || []).length > 0 });
 
       const cfg = buildConfig({
         proxyIp, port: settings.port, protocol: settings.protocol, sni: net.isIP(settings.host) ? '' : settings.host,
         username: settings.username, password: settings.password,
-        allowLan: settings.allowLan, dnsServer: settings.dnsServer,
+        allowLan: settings.allowLan, dnsServer: settings.dnsServer, excluded: settings.excludedApps || [],
       });
       this.cfgJson = JSON.stringify(cfg, null, 2); // только в памяти
 
